@@ -1,11 +1,20 @@
+import { useMemo, useState } from "preact/hooks";
+import "./app.css";
+import { BookRepository } from "./library/book-repository";
+import {
+  LibraryScreen,
+  type BookSelection,
+} from "./library/library-screen";
+
 export function App() {
+  const repository = useMemo(() => new BookRepository(), []);
+  // Selection is retained for the reader shell (Task 8); library remains primary UI.
+  const [, setSelection] = useState<BookSelection | null>(null);
+
   return (
-    <main>
-      <h1>你的書庫</h1>
-      <p>書籍只會儲存在此裝置</p>
-      <button type="button" style={{ minWidth: "44px", minHeight: "44px" }}>
-        匯入 EPUB
-      </button>
-    </main>
+    <LibraryScreen
+      repository={repository}
+      onOpenBook={setSelection}
+    />
   );
 }
