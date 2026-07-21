@@ -1,0 +1,6 @@
+# SPA GET navigation fallback for the client-side library/reader routes.
+# POST /share-target is handled only by the service worker (SW-only).
+# There is no Cloudflare Pages Function, Worker, or backend route for share-target.
+# If a share POST reaches the origin without a controlling SW, static hosting
+# must not pretend to process the EPUB bytes server-side.
+/*    /index.html   200

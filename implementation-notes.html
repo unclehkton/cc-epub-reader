@@ -25,7 +25,21 @@
     <li>Web Share Target is progressive enhancement; the in-app file picker remains the iPhone-compatible baseline.</li>
     <li>Shared POST bodies must be intercepted locally by the service worker and must never fall through to Cloudflare Pages.</li>
     <li>Repository unit tests use Vitest's Node environment because fake-indexeddb cannot structured-clone jsdom's <code>Blob</code>; production Blob validation remains strict.</li>
+    <li>Hosting is static Cloudflare Pages only (<code>public/_headers</code>, <code>public/_redirects</code>); no Functions/Worker backend processes EPUB bytes.</li>
   </ul>
+
+  <h2>CSP rationale (Task 10)</h2>
+  <p>Shipped Content-Security-Policy (Cloudflare Pages <code>public/_headers</code>):</p>
+  <p><code>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'</code></p>
+  <ul>
+    <li><strong>connect-src 'self' only</strong> — no analytics, insights, or application API hosts. EPUB import/share stay on-device.</li>
+    <li><strong>img-src … blob: data:</strong> — proven necessary for archive-local images. EPUB.js <code>archive.createUrl</code> / <code>URL.createObjectURL</code> produce <code>blob:</code> object URLs; the chapter transformer restores those only after tap-to-reveal (<code>data-epub-src</code>). <code>data:</code> covers rare inline images without opening network <code>http(s)</code>.</li>
+    <li><strong>No frame-src / child-src / script-src blob:</strong> — pinned epubjs <code>0.3.93</code> default view method is <code>srcdoc</code> (fallback <code>document.write</code>), not <code>method: "blobUrl"</code> which would set <code>iframe.src</code> to a blob URL. Scripts are stripped pre-render; chapter HTML is not loaded as a blob document under the default path. Do not add broad <code>blob:</code> or <code>*</code> wildcards without a failing production-preview repro.</li>
+    <li><strong>style-src 'unsafe-inline'</strong> — EPUB chapter and reader chrome rely on inline style application; remote stylesheets are stripped by the chapter transformer.</li>
+    <li><strong>font-src 'self' data:</strong> — app fonts from origin plus optional data-URI faces; no third-party font CDNs.</li>
+    <li><strong>object-src / base-uri / frame-ancestors none</strong> — reduce plugin, base-hijack, and clickjacking surface around untrusted EPUB markup.</li>
+  </ul>
+  <p><strong>Share-target / redirects:</strong> <code>public/_redirects</code> only provides SPA GET fallback <code>/* → /index.html 200</code>. It does not register <code>/share-target</code> as a server POST handler. POST processing is service-worker only.</p>
 
   <h2>Related documents</h2>
   <ul>
