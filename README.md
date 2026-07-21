@@ -33,7 +33,30 @@ Other scripts:
 | `npm run test` / `npm run test:run` | Vitest (watch / single run) |
 | `npm run build` | Production build into `dist/` |
 | `npm run preview` | Serve the production build locally |
-| `npm run test:e2e` | Playwright browser gates (when configured) |
+| `npm run check:bundle` | Fail if initial shell JS+CSS gzip &gt; 150 KiB |
+| `npm run test:e2e` | Playwright (chromium, webkit, mobile projects) |
+| `npm run fixtures` | Regenerate repository-owned test EPUBs |
+
+### Release gates (local)
+
+```bash
+npm ci
+npm run check
+npm run test:run
+npm run build
+npm run check:bundle
+npm run test:e2e
+```
+
+See [docs/release-checklist-0.1.md](./docs/release-checklist-0.1.md) for the recorded 0.1 verification evidence and external deploy prerequisites.
+
+**Fast E2E while developing:** build once, then `npx playwright test --project=chromium`. Full matrix before handoff.
+
+### Storage behavior
+
+- Books, progress, settings, and share-inbox blobs live in IndexedDB database `books-reader`.
+- EPUB payloads are stored as `ArrayBuffer` for WebKit compatibility.
+- Browser site-data clear removes the library; the UI states storage is not a guaranteed backup folder.
 
 ## Cloudflare Pages
 

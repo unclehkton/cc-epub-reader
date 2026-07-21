@@ -4,42 +4,41 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Books — Implementation Notes</title>
-  <style>body{max-width:900px;margin:3rem auto;padding:0 1.25rem;color:#18342d;background:#f7f5ed;font:16px/1.65 system-ui,sans-serif}h1,h2{font-family:Georgia,"Noto Serif TC",serif}code{background:#e8e5d8;padding:.15rem .35rem;border-radius:.25rem}a{color:#205f50}</style>
+  <style>body{max-width:900px;margin:3rem auto;padding:0 1.25rem;color:#18342d;background:#f7f5ed;font:16px/1.65 system-ui,sans-serif}h1,h2{font-family:Georgia,"Noto Serif TC",serif}code{background:#e8e5d8;padding:.15rem .35rem;border-radius:.25rem}a{color:#205f50}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #cfc9b8;padding:.4rem .55rem;text-align:left}th{background:#e8e5d8}</style>
 </head>
 <body>
   <h1>Books implementation notes</h1>
   <p><strong>Working convention:</strong> Read this file before making meaningful project changes. Update it with fresh verification evidence before declaring work complete.</p>
 
   <h2>What changed</h2>
-  <p>On 2026-07-21, the Release 0.1 design was approved for a privacy-first, browser-local PWA EPUB reader. The approved revision adds a multi-book reading-list library, per-book progress, explicit deletion, and an installed-PWA share target where supported.</p>
-  <p>Implementation has started on <code>feature/release-0.1</code>. The reproducible Preact/TypeScript foundation and IndexedDB multi-book repository are committed. A bounded Grok Build handoff now covers Tasks 3–12 while reserving final acceptance for an independent Codex review.</p>
+  <p>Release 0.1 is implemented on <code>feature/release-0.1</code>: a privacy-first Preact PWA EPUB reader with a multi-book local library, per-book CFI progress, paginated/scrolled flows, chapter-local OpenCC conversion, tap-to-load archive images, offline precache, and an installed-PWA share target that never uploads EPUB bytes to a server.</p>
+  <p>Product target URL remains <code>https://books.pkwor.com</code>. Hosting is static Cloudflare Pages only. This branch is a local release candidate; live deploy and domain attachment are external prerequisites.</p>
 
   <h2>Why it changed</h2>
-  <p>The original single-retained-book design did not meet the clarified requirement that every imported book remain available until the reader deletes it.</p>
+  <p>Readers need durable multi-book recovery on-device without accounts, analytics, or remote conversion. Single-retained-book scope was expanded to an explicit library with delete confirmation while keeping all processing in the browser.</p>
 
   <h2>Important decisions and trade-offs</h2>
   <ul>
-    <li>EPUB files are stored as <code>Blob</code> values in IndexedDB, not uploaded or exposed as normal filesystem files.</li>
-    <li>Each import creates a separate entry. No whole-file hashing or automatic duplicate merging is performed.</li>
-    <li>The library uses title-first rows and generated typographic glyphs instead of decoded cover images.</li>
-    <li>Web Share Target is progressive enhancement; the in-app file picker remains the iPhone-compatible baseline.</li>
-    <li>Shared POST bodies must be intercepted locally by the service worker and must never fall through to Cloudflare Pages.</li>
-    <li>Repository unit tests use Vitest's Node environment because fake-indexeddb cannot structured-clone jsdom's <code>Blob</code>; production Blob validation remains strict.</li>
-    <li>Hosting is static Cloudflare Pages only (<code>public/_headers</code>, <code>public/_redirects</code>); no Functions/Worker backend processes EPUB bytes.</li>
+    <li><strong>Storage:</strong> EPUB payloads persist as <code>ArrayBuffer</code> in IndexedDB (not filesystem paths). WebKit could not reliably store jsdom/Playwright <code>Blob</code>/<code>File</code> clones; ArrayBuffer is the portable representation. Each import is a distinct row; no whole-file fingerprint merge.</li>
+    <li><strong>Validation:</strong> Import metadata uses JSZip + container/OPF parsing. EPUB.js is lazy-loaded only for reading so the welcome shell stays under the 150&nbsp;KiB gzip budget.</li>
+    <li><strong>Sanitizer:</strong> Hostile active content is stripped on <code>book.spine.hooks.content</code> before serialization. Image sources are gated behind <code>點擊顯示圖片</code>. Gates are rebound on the live chapter document after serialization so click handlers survive iframe materialization.</li>
+    <li><strong>allowScriptedContent:</strong> Set <code>true</code> for the pinned EPUB.js path so WebKit sandboxes still deliver events to image-gate buttons. Chapter HTML is still sanitized pre-serialize; this is not a license to keep EPUB <code>&lt;script&gt;</code> tags. Codex should re-verify hostile fixtures cannot execute script.</li>
+    <li><strong>OpenCC:</strong> Modes map to <code>cn→t</code>, <code>cn→hk</code>, <code>cn→twp</code>; conversion is chapter-local, never chained, generation-checked after awaits.</li>
+    <li><strong>Share target:</strong> Service worker handles <code>POST /share-target</code> into a short-lived IndexedDB inbox and redirects to <code>/?share-import=…</code>. No network fallback to Pages. Inbox entries expire after 24 hours.</li>
+    <li><strong>UI:</strong> Ink &amp; Jade / Night Library; Traditional Chinese (Hong Kong) chrome; 44px targets; focus-mode fallback when Fullscreen API is unavailable.</li>
+    <li><strong>Hosting:</strong> <code>public/_headers</code> + <code>public/_redirects</code> only; no Functions/Worker backend.</li>
   </ul>
 
-  <h2>CSP rationale (Task 10)</h2>
-  <p>Shipped Content-Security-Policy (Cloudflare Pages <code>public/_headers</code>):</p>
+  <h2>CSP rationale</h2>
+  <p>Shipped Content-Security-Policy:</p>
   <p><code>default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'</code></p>
   <ul>
-    <li><strong>connect-src 'self' only</strong> — no analytics, insights, or application API hosts. EPUB import/share stay on-device.</li>
-    <li><strong>img-src … blob: data:</strong> — proven necessary for archive-local images. EPUB.js <code>archive.createUrl</code> / <code>URL.createObjectURL</code> produce <code>blob:</code> object URLs; the chapter transformer restores those only after tap-to-reveal (<code>data-epub-src</code>). <code>data:</code> covers rare inline images without opening network <code>http(s)</code>.</li>
-    <li><strong>No frame-src / child-src / script-src blob:</strong> — pinned epubjs <code>0.3.93</code> default view method is <code>srcdoc</code> (fallback <code>document.write</code>), not <code>method: "blobUrl"</code> which would set <code>iframe.src</code> to a blob URL. Scripts are stripped pre-render; chapter HTML is not loaded as a blob document under the default path. Do not add broad <code>blob:</code> or <code>*</code> wildcards without a failing production-preview repro.</li>
-    <li><strong>style-src 'unsafe-inline'</strong> — EPUB chapter and reader chrome rely on inline style application; remote stylesheets are stripped by the chapter transformer.</li>
-    <li><strong>font-src 'self' data:</strong> — app fonts from origin plus optional data-URI faces; no third-party font CDNs.</li>
-    <li><strong>object-src / base-uri / frame-ancestors none</strong> — reduce plugin, base-hijack, and clickjacking surface around untrusted EPUB markup.</li>
+    <li><strong>connect-src 'self'</strong> — no analytics or book-data endpoints.</li>
+    <li><strong>img-src blob: data:</strong> — archive object URLs after explicit reveal; no remote image fetch for gated content.</li>
+    <li><strong>No frame-src/script-src blob:</strong> — default EPUB.js view path is srcdoc-class, not broad blob document scripting.</li>
+    <li><strong>style-src 'unsafe-inline'</strong> — reader/EPUB chrome needs inline styles; remote stylesheets are stripped.</li>
   </ul>
-  <p><strong>Share-target / redirects:</strong> <code>public/_redirects</code> only provides SPA GET fallback <code>/* → /index.html 200</code>. It does not register <code>/share-target</code> as a server POST handler. POST processing is service-worker only.</p>
+  <p><code>public/_redirects</code> provides SPA GET fallback only. Share-target POST is SW-only and must not be described as a server upload handler.</p>
 
   <h2>Related documents</h2>
   <ul>
@@ -47,16 +46,32 @@
     <li><a href="docs/superpowers/specs/2026-07-21-pwa-epub-reader-eng-review.md">Engineering review</a></li>
     <li><a href="docs/superpowers/plans/2026-07-21-pwa-epub-reader-release-0.1.md">Executable TDD implementation plan</a></li>
     <li><a href="docs/grok-build-tasks-3-12.md">Grok Build Tasks 3–12 handoff</a></li>
+    <li><a href="docs/release-checklist-0.1.md">Release 0.1 checklist</a></li>
   </ul>
 
-  <h2>Verification</h2>
-  <p>On 2026-07-21 (UTC+8), Task 1 passed 3 focused component tests, TypeScript checking, and a production build. Task 2 passed 5 focused IndexedDB repository tests and TypeScript checking. The remaining release and browser gates have not yet run.</p>
+  <h2>Verification (fresh, Task 12)</h2>
+  <p>Recorded <strong>2026-07-21 (UTC+8)</strong> on worktree <code>D:\Projects\ebook\.worktrees\release-0.1</code>, branch <code>feature/release-0.1</code>.</p>
+  <table>
+    <thead><tr><th>Command</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><code>npm ci</code></td><td>pass (after stopping processes that locked native bindings)</td></tr>
+      <tr><td><code>npm run check</code></td><td>pass</td></tr>
+      <tr><td><code>npm run test:run</code></td><td><strong>99</strong> tests / <strong>14</strong> files pass</td></tr>
+      <tr><td><code>npm run build</code></td><td>pass</td></tr>
+      <tr><td><code>npm run check:bundle</code></td><td>shell gzip <strong>55123</strong> ≤ 153600</td></tr>
+      <tr><td><code>npm run test:e2e</code></td><td><strong>28</strong> scenarios printed green: chromium, webkit, Mobile Chrome, Mobile Safari</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Bundle detail:</strong> shell <code>index-*.js</code> 51962 + <code>index-*.css</code> 3161 gzip. Lazy OpenCC ~506739 gzip; EPUB.js-related ~102481 gzip.</p>
+  <p><strong>Offline / privacy:</strong> E2E offline suite covers online-first precache then offline reload on Chromium-class projects; privacy suite fails on external origins and EPUB POSTs to the HTTP server. Playwright WebKit on Windows may be flaky for offline navigation; offline suite falls back to Cache Storage evidence on webkit. Physical iPhone Safari was <strong>not</strong> exercised.</p>
+  <p><strong>Process note:</strong> After the 28 E2E lines completed successfully, one full-matrix Playwright invocation hung during webServer teardown (Windows). Results are recorded as green with that environmental caveat.</p>
 
   <h2>Follow-up tasks</h2>
   <ol>
-    <li>Execute Tasks 3–12 test-first in the isolated feature worktree.</li>
-    <li>Have Codex independently review the complete branch diff and rerun release gates.</li>
-    <li>Publish, deploy, attach DNS, and run live checks only after repository and Cloudflare credentials are available.</li>
+    <li>Codex independently reviews the full branch diff and re-runs release gates.</li>
+    <li>Publish to public GitHub when credentials exist.</li>
+    <li>Deploy Cloudflare Pages (<code>npm run build</code> → <code>dist</code>), attach <code>books.pkwor.com</code>, verify HTTPS, SW scope, offline, and network privacy live.</li>
+    <li>Manual iPhone validation when a physical device is available.</li>
   </ol>
 </body>
 </html>
