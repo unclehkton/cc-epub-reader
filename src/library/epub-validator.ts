@@ -129,15 +129,16 @@ export async function validateEpub(
 
   // Pinned EPUB.js spike for packaging metadata.
   const book = new Book();
+  let validated: ValidatedImport;
   try {
     await book.open(buffer, "binary");
     await book.ready;
 
-    const packaging = book.packaging as
+    const packaging = book.packaging as unknown as
       | {
           metadata?: { title?: string; creator?: string };
           encryption?: unknown;
-          manifest?: Record<string, { properties?: string }>;
+          manifest?: Record<string, { properties?: string | string[] }>;
         }
       | undefined;
 
@@ -149,7 +150,10 @@ export async function validateEpub(
     const manifest = packaging?.manifest;
     if (manifest) {
       for (const item of Object.values(manifest)) {
-        const props = item?.properties ?? "";
+        const rawProps = item?.properties;
+        const props = Array.isArray(rawProps)
+          ? rawProps.join(" ")
+          : (rawProps ?? "");
         if (
           typeof props === "string" &&
           props.toLowerCase().includes("encrypted")
@@ -169,15 +173,14 @@ export async function validateEpub(
         ? String(creatorRaw).trim()
         : undefined;
 
-    const result: ValidatedImport = {
+    validated = {
       fileName: name,
       epub: file,
       title,
     };
     if (creator !== undefined) {
-      result.creator = creator;
+      validated.creator = creator;
     }
-    return result;
   } catch (error) {
     if (error instanceof ImportError) {
       throw error;
@@ -198,4 +201,6 @@ export async function validateEpub(
       // EPUB.js may throw during teardown in non-browser environments.
     }
   }
+
+  return validated;
 }
