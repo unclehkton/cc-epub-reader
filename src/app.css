@@ -755,3 +755,47 @@ button {
   }
 }
 
+.sw-update-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 1rem;
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+  background: var(--jade-deep);
+  color: #f7f5ed;
+}
+
+.sw-update-notice p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.sw-update-notice__action {
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid rgba(247, 245, 237, 0.55);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.share-import-error {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+  background: rgba(163, 59, 44, 0.12);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.app-shell {
+  padding: 1.5rem 1rem;
+  color: var(--muted);
+}
+
