@@ -2,7 +2,7 @@
 
 **Branch:** `feature/release-0.1`  
 **Product URL (target):** `https://books.pkwor.com`  
-**Status:** Local release candidate verified. Not deployed. Not approved for production until Codex review and external GitHub/Cloudflare steps complete.
+**Status:** Local gates verified, but **release approval is blocked by the 2026-07-21 critical code review**. Not deployed.
 
 ## Local gates (required before handoff)
 
@@ -31,16 +31,16 @@ npm run test:e2e
 | --- | --- |
 | Timestamp | 2026-07-21 evening local (UTC+8), after `npm ci` |
 | `npm run check` | pass |
-| `npm run test:run` | **14** files, **99** tests passed |
+| `npm run test:run` | **16** files, **103** tests passed |
 | `npm run build` | pass |
 | Shell gzip | **55123** bytes (JS 51962 + CSS 3161); budget 153600 |
 | Lazy OpenCC chunk | ~506739 bytes gzip (not in shell budget) |
 | Lazy EPUB.js-related chunk | ~102481 bytes gzip (not in shell budget) |
-| `npm run test:e2e` | **28** tests listed green across `chromium`, `webkit`, `Mobile Chrome`, `Mobile Safari` (7 scenarios × 4 projects) |
+| `npm run test:e2e` | **28** tests passed with exit 0 across `chromium`, `webkit`, `Mobile Chrome`, `Mobile Safari` (7 scenarios × 4 projects); 156.9 seconds |
 | Offline | Chromium projects exercise online-first → offline reload/resume; WebKit may use Cache Storage precache evidence when offline navigation is flaky on Windows |
 | Physical iPhone | **Not run** — WebKit automation is evidence, not device proof |
 
-Note: One full-matrix Playwright process hung during webServer teardown after all 28 tests had already printed as passed. Treat results as green with that environmental caveat; re-run `npm run test:e2e` if a clean process exit is required for your CI.
+Playwright runner note: the Windows `webServer`-hook deadlock was removed. Global setup now starts Vite with a 30-second readiness deadline, preflights Chromium/WebKit, and global teardown releases the preview process. The fresh full matrix exited normally and port 4173 was released.
 
 ## Diff hygiene
 
@@ -75,9 +75,10 @@ npm run preview -- --host 127.0.0.1 --port 4173 --strictPort
 
 ## Codex independent review
 
-- [ ] Review full branch diff vs `main`
-- [ ] Re-run local gates
-- [ ] Pay special attention to: pre-serialize sanitizer, image gates, `allowScriptedContent` rationale, share-target never network-falling-through, ArrayBuffer IDB storage for WebKit
+- [x] Review full branch diff vs `main`
+- [x] Re-run local gates
+- [ ] Resolve all P1 findings in [`code-review-2026-07-21.md`](code-review-2026-07-21.md)
+- [ ] Re-review sanitizer, memory model, persistence races, PWA icons, and session-only storage fallback
 
 ## Explicit non-claims
 

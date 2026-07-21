@@ -3,14 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20.19.0" },
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
     "test": "vitest",
     "test:run": "vitest run",
-    "test:e2e": "playwright test",
+    "test:e2e": "npm run build && playwright test",
     "preview": "vite preview",
     "check:bundle": "node scripts/check-bundle.mjs",
     "fixtures": "node scripts/generate-fixtures.mjs"
@@ -26,6 +28,7 @@
     "@preact/preset-vite": "2.10.6",
     "@testing-library/preact": "3.2.4",
     "@testing-library/user-event": "14.6.1",
+    "@types/node": "^24.0.0",
     "fake-indexeddb": "6.2.5",
     "jsdom": "29.1.1",
     "typescript": "7.0.2",
