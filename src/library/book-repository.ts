@@ -1,4 +1,5 @@
 import type {
+  BookMeta,
   LibraryBook,
   ShareInboxEntry,
   StoredBook,
@@ -12,7 +13,6 @@ function createId(): string {
     return crypto.randomUUID();
   }
 
-  // UUID v4-like fallback for environments without randomUUID (e.g. iOS 15).
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -24,11 +24,6 @@ function createId(): string {
 
 const EPUB_MIME = "application/epub+zip";
 
-/**
- * Persist EPUB bytes as ArrayBuffer. WebKit/Playwright cannot structured-clone
- * Blob/File into IndexedDB ("Error preparing Blob/File data…"), while
- * ArrayBuffer stores and restores reliably across Chromium and WebKit.
- */
 async function toStorableEpubBytes(source: Blob): Promise<ArrayBuffer> {
   return source.arrayBuffer();
 }
@@ -42,15 +37,12 @@ function epubBytesToBlob(value: unknown): Blob | undefined {
   }
   if (ArrayBuffer.isView(value)) {
     const view = value as ArrayBufferView;
-    const base = view.buffer;
-    const start = view.byteOffset;
-    const end = view.byteOffset + view.byteLength;
-    // Copy into a plain ArrayBuffer so BlobPart typing stays narrow.
     const copy = new ArrayBuffer(view.byteLength);
-    new Uint8Array(copy).set(new Uint8Array(base, start, view.byteLength));
+    new Uint8Array(copy).set(
+      new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+    );
     return new Blob([copy], { type: EPUB_MIME });
   }
-  // Defensive duck-type for structured-clone edge cases that still look like Blob.
   if (value !== null && typeof value === "object") {
     const candidate = value as {
       size?: unknown;
@@ -70,16 +62,19 @@ function epubBytesToBlob(value: unknown): Blob | undefined {
   return undefined;
 }
 
-/** Record shape written to the books object store (epub as ArrayBuffer). */
-interface PersistedBookRecord {
+interface PersistedMeta {
   id: string;
   fileName: string;
   byteLength: number;
-  epub: ArrayBuffer;
   title: string;
   creator?: string;
   savedAt: number;
   lastOpenedAt?: number;
+}
+
+interface PersistedPayload {
+  id: string;
+  epub: ArrayBuffer;
 }
 
 interface PersistedShareRecord {
@@ -98,62 +93,50 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function parseStoredBook(value: unknown): StoredBook | undefined {
+function parseBookMeta(value: unknown): BookMeta | undefined {
   if (value === null || typeof value !== "object") {
     return undefined;
   }
-
   const record = value as Record<string, unknown>;
-  const epub = epubBytesToBlob(record.epub);
-
   if (
     !isNonEmptyString(record.id) ||
     !isNonEmptyString(record.fileName) ||
     !isFiniteNumber(record.byteLength) ||
-    !epub ||
     !isNonEmptyString(record.title) ||
     !isFiniteNumber(record.savedAt)
   ) {
     return undefined;
   }
-
   if (record.creator !== undefined && typeof record.creator !== "string") {
     return undefined;
   }
-
   if (
     record.lastOpenedAt !== undefined &&
     !isFiniteNumber(record.lastOpenedAt)
   ) {
     return undefined;
   }
-
-  const book: StoredBook = {
+  const meta: BookMeta = {
     id: record.id,
     fileName: record.fileName,
     byteLength: record.byteLength,
-    epub,
     title: record.title,
     savedAt: record.savedAt,
   };
-
   if (typeof record.creator === "string") {
-    book.creator = record.creator;
+    meta.creator = record.creator;
   }
   if (isFiniteNumber(record.lastOpenedAt)) {
-    book.lastOpenedAt = record.lastOpenedAt;
+    meta.lastOpenedAt = record.lastOpenedAt;
   }
-
-  return book;
+  return meta;
 }
 
 function parseStoredProgress(value: unknown): StoredProgress | undefined {
   if (value === null || typeof value !== "object") {
     return undefined;
   }
-
   const record = value as Record<string, unknown>;
-
   if (
     !isNonEmptyString(record.bookId) ||
     !isFiniteNumber(record.approximatePercent) ||
@@ -161,27 +144,23 @@ function parseStoredProgress(value: unknown): StoredProgress | undefined {
   ) {
     return undefined;
   }
-
   if (record.cfi !== undefined && typeof record.cfi !== "string") {
     return undefined;
   }
   if (record.spineHref !== undefined && typeof record.spineHref !== "string") {
     return undefined;
   }
-
   const progress: StoredProgress = {
     bookId: record.bookId,
     approximatePercent: record.approximatePercent,
     updatedAt: record.updatedAt,
   };
-
   if (typeof record.cfi === "string") {
     progress.cfi = record.cfi;
   }
   if (typeof record.spineHref === "string") {
     progress.spineHref = record.spineHref;
   }
-
   return progress;
 }
 
@@ -189,10 +168,8 @@ function parseShareInboxEntry(value: unknown): ShareInboxEntry | undefined {
   if (value === null || typeof value !== "object") {
     return undefined;
   }
-
   const record = value as Record<string, unknown>;
   const epub = epubBytesToBlob(record.epub);
-
   if (
     !isNonEmptyString(record.id) ||
     !isNonEmptyString(record.fileName) ||
@@ -202,7 +179,6 @@ function parseShareInboxEntry(value: unknown): ShareInboxEntry | undefined {
   ) {
     return undefined;
   }
-
   return {
     id: record.id,
     fileName: record.fileName,
@@ -212,16 +188,28 @@ function parseShareInboxEntry(value: unknown): ShareInboxEntry | undefined {
   };
 }
 
-/** Sort key: lastOpenedAt when present, otherwise savedAt (descending). */
-function sortKey(book: StoredBook): number {
+function sortKey(book: BookMeta): number {
   return book.lastOpenedAt ?? book.savedAt;
 }
 
+function toPersistedMeta(book: BookMeta): PersistedMeta {
+  const meta: PersistedMeta = {
+    id: book.id,
+    fileName: book.fileName,
+    byteLength: book.byteLength,
+    title: book.title,
+    savedAt: book.savedAt,
+  };
+  if (book.creator !== undefined) {
+    meta.creator = book.creator;
+  }
+  if (book.lastOpenedAt !== undefined) {
+    meta.lastOpenedAt = book.lastOpenedAt;
+  }
+  return meta;
+}
+
 export class BookRepository {
-  /**
-   * Open a short-lived connection per operation so callers (and tests) can
-   * delete the database without getting stuck on blocked connections.
-   */
   private async withDb<T>(fn: (db: IDBDatabase) => Promise<T>): Promise<T> {
     const db = await openDatabase();
     try {
@@ -246,36 +234,32 @@ export class BookRepository {
       book.creator = input.creator;
     }
 
-    const persisted: PersistedBookRecord = {
-      id: book.id,
-      fileName: book.fileName,
-      byteLength: book.byteLength,
-      epub: epubBytes,
-      title: book.title,
-      savedAt: book.savedAt,
-    };
-    if (book.creator !== undefined) {
-      persisted.creator = book.creator;
-    }
+    const meta = toPersistedMeta(book);
+    const payload: PersistedPayload = { id: book.id, epub: epubBytes };
 
     await this.withDb(async (db) => {
-      const tx = db.transaction("books", "readwrite");
+      const tx = db.transaction(["bookMeta", "bookPayload"], "readwrite");
       const done = transactionDone(tx);
-      const put = requestToPromise(tx.objectStore("books").put(persisted));
-      await Promise.all([put, done]);
+      const putMeta = requestToPromise(tx.objectStore("bookMeta").put(meta));
+      const putPayload = requestToPromise(
+        tx.objectStore("bookPayload").put(payload),
+      );
+      await Promise.all([putMeta, putPayload, done]);
     });
 
     return book;
   }
 
+  /**
+   * List library rows without loading EPUB ArrayBuffers into memory.
+   */
   async listBooks(): Promise<LibraryBook[]> {
     return this.withDb(async (db) => {
-      const tx = db.transaction(["books", "progress"], "readonly");
+      const tx = db.transaction(["bookMeta", "progress"], "readonly");
       const done = transactionDone(tx);
-      // Start both requests before any await so the transaction stays alive.
-      const booksReq = requestToPromise(tx.objectStore("books").getAll());
+      const metaReq = requestToPromise(tx.objectStore("bookMeta").getAll());
       const progressReq = requestToPromise(tx.objectStore("progress").getAll());
-      const [rawBooks, rawProgress] = await Promise.all([booksReq, progressReq]);
+      const [rawMeta, rawProgress] = await Promise.all([metaReq, progressReq]);
       await done;
 
       const progressByBookId = new Map<string, StoredProgress>();
@@ -287,14 +271,26 @@ export class BookRepository {
       }
 
       const rows: LibraryBook[] = [];
-      for (const raw of rawBooks) {
-        const book = parseStoredBook(raw);
+      for (const raw of rawMeta) {
+        const book = parseBookMeta(raw);
         if (!book) {
-          // Skip corrupted book records; never delete unrelated rows.
           continue;
         }
-        const progress = progressByBookId.get(book.id);
+        // Guard: metadata rows must not carry payload fields from a bad migration.
+        if ("epub" in (raw as object)) {
+          // Strip accidental payload if present in the object we return.
+          const { epub: _drop, ...rest } = raw as BookMeta & { epub?: unknown };
+          void _drop;
+          const cleaned = parseBookMeta(rest);
+          if (!cleaned) continue;
+          const entry: LibraryBook = { book: cleaned };
+          const progress = progressByBookId.get(cleaned.id);
+          if (progress) entry.progress = progress;
+          rows.push(entry);
+          continue;
+        }
         const entry: LibraryBook = { book };
+        const progress = progressByBookId.get(book.id);
         if (progress) {
           entry.progress = progress;
         }
@@ -307,15 +303,10 @@ export class BookRepository {
         if (bKey !== aKey) {
           return bKey - aKey;
         }
-        // Equal keys: prefer a row that was opened over a savedAt-only peer.
         const aHasOpened = a.book.lastOpenedAt !== undefined;
         const bHasOpened = b.book.lastOpenedAt !== undefined;
-        if (aHasOpened && !bHasOpened) {
-          return -1;
-        }
-        if (!aHasOpened && bHasOpened) {
-          return 1;
-        }
+        if (aHasOpened && !bHasOpened) return -1;
+        if (!aHasOpened && bHasOpened) return 1;
         return b.book.savedAt - a.book.savedAt;
       });
 
@@ -325,40 +316,35 @@ export class BookRepository {
 
   async getBook(id: string): Promise<StoredBook | undefined> {
     return this.withDb(async (db) => {
-      // Read and write in separate transactions so we never issue a request
-      // after an await has deactivated the previous transaction.
-      const readTx = db.transaction("books", "readonly");
+      const readTx = db.transaction(["bookMeta", "bookPayload"], "readonly");
       const readDone = transactionDone(readTx);
-      const raw = await requestToPromise(readTx.objectStore("books").get(id));
+      const metaReq = requestToPromise(readTx.objectStore("bookMeta").get(id));
+      const payloadReq = requestToPromise(
+        readTx.objectStore("bookPayload").get(id),
+      );
+      const [rawMeta, rawPayload] = await Promise.all([metaReq, payloadReq]);
       await readDone;
 
-      const book = parseStoredBook(raw);
-      if (!book || book.id !== id) {
-        // Missing or corrupted: do not mutate or delete other records.
+      const meta = parseBookMeta(rawMeta);
+      if (!meta || meta.id !== id) {
+        return undefined;
+      }
+      const payloadRecord = rawPayload as PersistedPayload | undefined;
+      const epub = epubBytesToBlob(payloadRecord?.epub);
+      if (!epub) {
         return undefined;
       }
 
-      book.lastOpenedAt = Date.now();
-
-      const epubBytes = await toStorableEpubBytes(book.epub);
-      const persisted: PersistedBookRecord = {
-        id: book.id,
-        fileName: book.fileName,
-        byteLength: book.byteLength,
-        epub: epubBytes,
-        title: book.title,
-        savedAt: book.savedAt,
-        lastOpenedAt: book.lastOpenedAt,
-      };
-      if (book.creator !== undefined) {
-        persisted.creator = book.creator;
-      }
-
-      const writeTx = db.transaction("books", "readwrite");
+      // Update lastOpenedAt on metadata only — never rewrite the EPUB payload.
+      meta.lastOpenedAt = Date.now();
+      const writeTx = db.transaction("bookMeta", "readwrite");
       const writeDone = transactionDone(writeTx);
-      const put = requestToPromise(writeTx.objectStore("books").put(persisted));
+      const put = requestToPromise(
+        writeTx.objectStore("bookMeta").put(toPersistedMeta(meta)),
+      );
       await Promise.all([put, writeDone]);
-      return book;
+
+      return { ...meta, epub };
     });
   }
 
@@ -373,14 +359,19 @@ export class BookRepository {
 
   async deleteBook(id: string): Promise<void> {
     await this.withDb(async (db) => {
-      const tx = db.transaction(["books", "progress"], "readwrite");
+      const tx = db.transaction(
+        ["bookMeta", "bookPayload", "progress"],
+        "readwrite",
+      );
       const done = transactionDone(tx);
-      // Delete only the selected key paths — never a different bookId.
-      const delBook = requestToPromise(tx.objectStore("books").delete(id));
+      const delMeta = requestToPromise(tx.objectStore("bookMeta").delete(id));
+      const delPayload = requestToPromise(
+        tx.objectStore("bookPayload").delete(id),
+      );
       const delProgress = requestToPromise(
         tx.objectStore("progress").delete(id),
       );
-      await Promise.all([delBook, delProgress, done]);
+      await Promise.all([delMeta, delPayload, delProgress, done]);
     });
   }
 
@@ -419,31 +410,22 @@ export class BookRepository {
       book.creator = validated.creator;
     }
 
-    const persisted: PersistedBookRecord = {
-      id: book.id,
-      fileName: book.fileName,
-      byteLength: book.byteLength,
-      epub: epubBytes,
-      title: book.title,
-      savedAt: book.savedAt,
-    };
-    if (book.creator !== undefined) {
-      persisted.creator = book.creator;
-    }
+    const meta = toPersistedMeta(book);
+    const payload: PersistedPayload = { id: book.id, epub: epubBytes };
 
     await this.withDb(async (db) => {
-      // Multi-step atomic work: chain put/delete inside get onsuccess so the
-      // transaction never auto-commits between requests.
       await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(["shareInbox", "books"], "readwrite");
+        const tx = db.transaction(
+          ["shareInbox", "bookMeta", "bookPayload"],
+          "readwrite",
+        );
         const inboxStore = tx.objectStore("shareInbox");
-        const booksStore = tx.objectStore("books");
+        const metaStore = tx.objectStore("bookMeta");
+        const payloadStore = tx.objectStore("bookPayload");
 
         let settled = false;
         const fail = (error: unknown) => {
-          if (settled) {
-            return;
-          }
+          if (settled) return;
           settled = true;
           reject(error instanceof Error ? error : new Error(String(error)));
         };
@@ -465,18 +447,16 @@ export class BookRepository {
         getReq.onsuccess = () => {
           const inbox = parseShareInboxEntry(getReq.result);
           if (!inbox || inbox.id !== id) {
-            // Do not delete a different inbox row when validation fails.
             fail(new Error(`Share inbox entry not found: ${id}`));
             try {
               tx.abort();
             } catch {
-              // Transaction may already be finishing.
+              // finishing
             }
             return;
           }
-
-          // Same readwrite transaction: add book, delete only matching inbox id.
-          booksStore.put(persisted);
+          metaStore.put(meta);
+          payloadStore.put(payload);
           inboxStore.delete(id);
         };
         getReq.onerror = () => {

@@ -143,7 +143,8 @@ export interface AdaptedBook {
 }
 
 export interface EpubFactoryOptions {
-  replacements?: string;
+  /** false = no archive-wide blob/base64 rewrites (preferred). */
+  replacements?: string | false;
   openAs?: string;
   encoding?: string;
   [key: string]: unknown;
@@ -173,8 +174,9 @@ export const DEFAULT_RENDITION_OPTIONS: RenditionCreateOptions = {
   flow: "paginated",
   spread: "none",
   manager: "default",
-  // Image gates need script-capable sandbox on WebKit; content is sanitized first.
-  allowScriptedContent: true,
+  // Never enable EPUB script execution. Image gates are bound from the app
+  // after render; hostile content is stripped pre-serialization.
+  allowScriptedContent: false,
 };
 
 /**
@@ -240,8 +242,11 @@ export async function loadEpubFactory(): Promise<EpubFactory> {
   const construct = resolveEpubConstructor(mod);
 
   return (source: ArrayBuffer | string, options?: EpubFactoryOptions) => {
+    // Do not use archive-wide blobUrl replacements — that eagerly materializes
+    // object URLs for every package resource. Resolve package paths lazily and
+    // create blob URLs only for explicitly revealed chapter assets.
     return construct(source, {
-      replacements: "blobUrl",
+      replacements: options?.replacements ?? false,
       ...options,
     });
   };

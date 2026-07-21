@@ -1,12 +1,17 @@
-export interface StoredBook {
+/** Library list row — never includes the EPUB payload. */
+export interface BookMeta {
   id: string;
   fileName: string;
   byteLength: number;
-  epub: Blob;
   title: string;
   creator?: string;
   savedAt: number;
   lastOpenedAt?: number;
+}
+
+/** Full book with payload, loaded only when opening a reader session. */
+export interface StoredBook extends BookMeta {
+  epub: Blob;
 }
 
 export interface StoredProgress {
@@ -33,7 +38,8 @@ export interface ValidatedImport {
 }
 
 export interface LibraryBook {
-  book: StoredBook;
+  /** Metadata only — listBooks must not materialize EPUB bytes. */
+  book: BookMeta;
   progress?: StoredProgress;
 }
 

@@ -190,7 +190,7 @@ class ReaderSessionImpl implements ReaderSession {
         throw staleError();
       }
 
-      const book = factory(buffer, { replacements: "blobUrl" });
+      const book = factory(buffer, { replacements: false });
       this.book = book;
       this.registerSpineTransform(book);
 
@@ -456,17 +456,14 @@ class ReaderSessionImpl implements ReaderSession {
       ...DEFAULT_RENDITION_OPTIONS,
       flow: this.flow === "scrolled" ? "scrolled-doc" : "paginated",
       spread: "none",
-      // allow-scripts is required for image-gate listeners inside the EPUB.js
-      // iframe on WebKit. Hostile scripts are still stripped pre-serialization
-      // in transformChapter; this flag only relaxes the iframe sandbox.
-      allowScriptedContent: true,
+      allowScriptedContent: false,
       width: "100%",
       height: "100%",
     };
 
     const rendition = book.renderTo(this.element, options);
     if (rendition.settings) {
-      rendition.settings.allowScriptedContent = true;
+      rendition.settings.allowScriptedContent = false;
     }
     return rendition;
   }
@@ -602,6 +599,7 @@ class ReaderSessionImpl implements ReaderSession {
   private syncLocationFromRendition(): void {
     const rendition = this.rendition;
     if (!rendition) return;
+    const gen = this.generation;
 
     const raw = rendition.location ?? null;
     if (raw) {
@@ -617,7 +615,11 @@ class ReaderSessionImpl implements ReaderSession {
     const current = rendition.currentLocation?.();
     if (current && typeof (current as Promise<unknown>).then === "function") {
       void (current as Promise<AdaptedLocation | undefined>).then((loc) => {
-        if (this.destroyed || !loc) return;
+        // Drop stale async location reads from a prior chapter/generation.
+        if (this.destroyed || !this.isCurrent(gen) || this.rendition !== rendition) {
+          return;
+        }
+        if (!loc) return;
         const mapped = mapLocation(loc, this.spineCount);
         if (mapped) {
           this.location = mapped;

@@ -3,6 +3,8 @@ import type { ValidatedImport } from "../domain/types";
 import { ImportError } from "./import-errors";
 
 export const MAX_EPUB_BYTES = 100 * 1024 * 1024;
+/** Max uncompressed size for container.xml / package OPF text entries. */
+export const MAX_METADATA_ENTRY_BYTES = 2 * 1024 * 1024;
 
 const ZIP_LOCAL_FILE_HEADER = [0x50, 0x4b, 0x03, 0x04] as const;
 const ACCEPTED_MIME = new Set([
@@ -32,6 +34,26 @@ async function hasZipMagic(file: Blob): Promise<boolean> {
   }
   const header = new Uint8Array(await file.slice(0, 4).arrayBuffer());
   return ZIP_LOCAL_FILE_HEADER.every((byte, index) => header[index] === byte);
+}
+
+/**
+ * Reject ZIP entries whose declared uncompressed size exceeds the ceiling
+ * before calling JSZip async decompression (ZIP bomb mitigation).
+ */
+function assertEntrySize(entry: unknown, maxBytes: number): void {
+  const record = entry as {
+    _data?: { uncompressedSize?: number };
+    uncompressedSize?: number;
+  };
+  const declared =
+    typeof record.uncompressedSize === "number"
+      ? record.uncompressedSize
+      : typeof record._data?.uncompressedSize === "number"
+        ? record._data.uncompressedSize
+        : undefined;
+  if (typeof declared === "number" && declared > maxBytes) {
+    fail("too-large");
+  }
 }
 
 function safeMessage(code: ImportError["code"]): string {
@@ -167,10 +189,15 @@ export async function validateEpub(
 
   let rootPath: string | undefined;
   try {
+    assertEntrySize(containerFile, MAX_METADATA_ENTRY_BYTES);
     const containerXml = await containerFile.async("text");
+    if (containerXml.length > MAX_METADATA_ENTRY_BYTES) {
+      fail("too-large");
+    }
     const match = containerXml.match(/full-path\s*=\s*["']([^"']+)["']/i);
     rootPath = match?.[1];
-  } catch {
+  } catch (error) {
+    if (error instanceof ImportError) throw error;
     fail("missing-container");
   }
 
@@ -185,8 +212,13 @@ export async function validateEpub(
 
   let opfXml: string;
   try {
+    assertEntrySize(packageFile, MAX_METADATA_ENTRY_BYTES);
     opfXml = await packageFile.async("text");
-  } catch {
+    if (opfXml.length > MAX_METADATA_ENTRY_BYTES) {
+      fail("too-large");
+    }
+  } catch (error) {
+    if (error instanceof ImportError) throw error;
     fail("missing-package");
   }
 

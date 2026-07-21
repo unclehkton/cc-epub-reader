@@ -80,25 +80,39 @@ export async function expireShareInbox(
 ): Promise<number> {
   const db = await openDatabase();
   try {
-    const tx = db.transaction("shareInbox", "readwrite");
-    const store = tx.objectStore("shareInbox");
-    const done = transactionDone(tx);
-    const all = await requestToPromise(store.getAll());
-    let removed = 0;
+    // Collect expired ids first in a readonly transaction, then delete in a
+    // second write transaction. Awaiting getAll() then deleting on the same
+    // transaction is unreliable on WebKit (transaction may auto-close).
+    const readTx = db.transaction("shareInbox", "readonly");
+    const readDone = transactionDone(readTx);
+    const all = await requestToPromise(readTx.objectStore("shareInbox").getAll());
+    await readDone;
+
+    const expiredIds: string[] = [];
     for (const raw of all) {
-      const entry = raw as ShareInboxEntry | undefined;
+      const entry = raw as { id?: unknown; receivedAt?: unknown } | undefined;
       if (
         entry &&
         typeof entry.id === "string" &&
         typeof entry.receivedAt === "number" &&
         now - entry.receivedAt > SHARE_INBOX_TTL_MS
       ) {
-        store.delete(entry.id);
-        removed += 1;
+        expiredIds.push(entry.id);
       }
     }
-    await done;
-    return removed;
+
+    if (expiredIds.length === 0) {
+      return 0;
+    }
+
+    const writeTx = db.transaction("shareInbox", "readwrite");
+    const store = writeTx.objectStore("shareInbox");
+    const writeDone = transactionDone(writeTx);
+    const deletes = expiredIds.map((id) =>
+      requestToPromise(store.delete(id)),
+    );
+    await Promise.all([...deletes, writeDone]);
+    return expiredIds.length;
   } finally {
     db.close();
   }

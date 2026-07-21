@@ -70,6 +70,20 @@ describe("BookRepository", () => {
     repository = new BookRepository();
   });
 
+  it("listBooks returns metadata without materializing EPUB payloads", async () => {
+    await repository.importBook(
+      makeImport({ title: "Payload Book", fileName: "payload.epub" }),
+    );
+    const listed = await repository.listBooks();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.book.title).toBe("Payload Book");
+    expect("epub" in listed[0]!.book).toBe(false);
+
+    const opened = await repository.getBook(listed[0]!.book.id);
+    expect(opened?.epub).toBeInstanceOf(Blob);
+    expect(opened?.epub.size).toBeGreaterThan(0);
+  });
+
   it("keeps two imports as distinct library entries", async () => {
     const first = await repository.importBook(
       makeImport({ title: "First Book", fileName: "first.epub" }),

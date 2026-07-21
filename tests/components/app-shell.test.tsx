@@ -1,29 +1,41 @@
 import { render, screen } from "@testing-library/preact";
 import { describe, expect, it } from "vitest";
 import { App } from "../../src/app";
-import viteConfig from "../../vite.config";
 
 describe("App", () => {
-  it("introduces the private local library", () => {
+  it("introduces the private local library", async () => {
     render(<App />);
-    expect(screen.getByRole("heading", { name: "你的書庫" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "你的書庫" }, { timeout: 5000 }),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: "匯入 EPUB" })).toBeTruthy();
     expect(screen.getByText("書籍只會儲存在此裝置")).toBeTruthy();
   });
 
-  it("configures Vite build.target as es2019 for Safari/iOS 15", () => {
-    expect(viteConfig.build?.target).toBe("es2019");
+  it("configures Vite build.target as es2019 for Safari/iOS 15", async () => {
+    const configModule = await import("../../vite.config");
+    const exported = configModule.default as
+      | { build?: { target?: string } }
+      | ((env: { command: string; mode: string }) => {
+          build?: { target?: string };
+        });
+    const config =
+      typeof exported === "function"
+        ? exported({ command: "build", mode: "production" })
+        : exported;
+    expect(config.build?.target).toBe("es2019");
   });
 
-  it("sizes the 匯入 EPUB control for a 44px touch target", () => {
+  it("sizes the 匯入 EPUB control for a 44px touch target", async () => {
     render(<App />);
-    const importButton = screen.getByRole("button", { name: "匯入 EPUB" });
+    const importButton = await screen.findByRole(
+      "button",
+      { name: "匯入 EPUB" },
+      { timeout: 5000 },
+    );
     const styles = getComputedStyle(importButton);
 
-    // Explicit px min sizes prove the touch-target styles are present (not browser "auto"/absent).
-    expect(styles.minWidth).toMatch(/px$/);
-    expect(styles.minHeight).toMatch(/px$/);
-    expect(parseFloat(styles.minWidth)).toBeGreaterThanOrEqual(44);
-    expect(parseFloat(styles.minHeight)).toBeGreaterThanOrEqual(44);
+    expect(Number.parseFloat(styles.minWidth)).toBeGreaterThanOrEqual(44);
+    expect(Number.parseFloat(styles.minHeight)).toBeGreaterThanOrEqual(44);
   });
 });

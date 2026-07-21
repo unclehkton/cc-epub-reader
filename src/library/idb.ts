@@ -1,7 +1,13 @@
 export const DB_NAME = "books-reader";
-export const DB_VERSION = 1;
+/** v2 splits book metadata from EPUB payloads so listBooks is memory-safe. */
+export const DB_VERSION = 2;
 
-export type StoreName = "books" | "progress" | "shareInbox" | "settings";
+export type StoreName =
+  | "bookMeta"
+  | "bookPayload"
+  | "progress"
+  | "shareInbox"
+  | "settings";
 
 export function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -25,12 +31,14 @@ export function openDatabase(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
-
-      if (!db.objectStoreNames.contains("books")) {
-        db.createObjectStore("books", { keyPath: "id" });
+      const oldVersion = event.oldVersion;
+      const tx = request.transaction;
+      if (!tx) {
+        return;
       }
+
       if (!db.objectStoreNames.contains("progress")) {
         db.createObjectStore("progress", { keyPath: "bookId" });
       }
@@ -39,6 +47,49 @@ export function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains("settings")) {
         db.createObjectStore("settings", { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains("bookMeta")) {
+        db.createObjectStore("bookMeta", { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains("bookPayload")) {
+        db.createObjectStore("bookPayload", { keyPath: "id" });
+      }
+
+      // Migrate v1 `books` rows into meta + payload, then drop payloads from list path.
+      if (oldVersion < 2 && db.objectStoreNames.contains("books")) {
+        const legacy = tx.objectStore("books");
+        const meta = tx.objectStore("bookMeta");
+        const payload = tx.objectStore("bookPayload");
+        const cursorReq = legacy.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            return;
+          }
+          const record = cursor.value as Record<string, unknown>;
+          const id = record.id;
+          if (typeof id === "string") {
+            const metaRow: Record<string, unknown> = {
+              id,
+              fileName: record.fileName,
+              byteLength: record.byteLength,
+              title: record.title,
+              savedAt: record.savedAt,
+            };
+            if (typeof record.creator === "string") {
+              metaRow.creator = record.creator;
+            }
+            if (typeof record.lastOpenedAt === "number") {
+              metaRow.lastOpenedAt = record.lastOpenedAt;
+            }
+            meta.put(metaRow);
+            if (record.epub !== undefined) {
+              payload.put({ id, epub: record.epub });
+            }
+          }
+          cursor.delete();
+          cursor.continue();
+        };
       }
     };
 

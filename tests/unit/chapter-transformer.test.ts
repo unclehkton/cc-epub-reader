@@ -81,6 +81,37 @@ describe("transformChapter sanitizer", () => {
     expect(doc.body.textContent).toContain("safe text");
   });
 
+  it("removes uppercase SCRIPT and media fetchers in XHTML documents", () => {
+    const xhtml = `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>x</title>
+    <style>@import url("https://evil.example/a.css"); p { background: url(https://evil.example/b.png); }</style>
+  </head>
+  <body>
+    <SCRIPT type="text/javascript">window.pwned=1</SCRIPT>
+    <video src="https://evil.example/v.mp4"></video>
+    <audio src="https://evil.example/a.mp3"></audio>
+    <p style="background:url(https://evil.example/c.png)">ok</p>
+    <a href="https://example.com/out">out</a>
+  </body>
+</html>`;
+    const doc = new DOMParser().parseFromString(xhtml, "application/xhtml+xml");
+    transformChapter(doc, localResolver);
+
+    expect(doc.getElementsByTagName("script").length).toBe(0);
+    expect(doc.getElementsByTagName("SCRIPT").length).toBe(0);
+    expect(doc.getElementsByTagName("video").length).toBe(0);
+    expect(doc.getElementsByTagName("audio").length).toBe(0);
+    const styleText = doc.getElementsByTagName("style")[0]?.textContent ?? "";
+    expect(styleText.toLowerCase()).not.toContain("@import");
+    expect(styleText.toLowerCase()).not.toContain("https://evil.example");
+    const p = doc.getElementsByTagName("p")[0]!;
+    expect(p.getAttribute("style") ?? "").not.toMatch(/https?:/i);
+    const a = doc.getElementsByTagName("a")[0]!;
+    expect(a.getAttribute("rel")).toContain("noopener");
+    expect(a.getAttribute("target")).toBe("_blank");
+  });
+
   it("strips inline event handlers and javascript: links", () => {
     const doc = parseHtml(`<!DOCTYPE html><html><body>
       <p onclick="alert(1)" onmouseover="alert(2)">text</p>

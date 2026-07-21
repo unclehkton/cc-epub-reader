@@ -15,7 +15,8 @@
     "test:e2e": "npm run build && playwright test",
     "preview": "vite preview",
     "check:bundle": "node scripts/check-bundle.mjs",
-    "fixtures": "node scripts/generate-fixtures.mjs"
+    "fixtures": "node scripts/generate-fixtures.mjs",
+    "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
     "epubjs": "0.3.93",

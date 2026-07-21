@@ -80,3 +80,26 @@ Fresh result: all 28 projects/scenarios passed and the process exited normally i
 | Preview teardown | port 4173 released |
 
 Physical iPhone Safari and the live `books.pkwor.com` deployment were not tested.
+
+## Follow-up status (same day)
+
+Remediation landed on `feature/release-0.1` after this review:
+
+| Finding | Status |
+| --- | --- |
+| P1 sanitizer / `allowScriptedContent` | **Fixed** — case-insensitive tag walk, style/@import neutralization, media strip, external links `noopener`; rendition `allowScriptedContent: false` |
+| P1 listBooks full EPUB load | **Fixed** — IDB v2 `bookMeta` + `bookPayload`; list uses meta only |
+| P1 archive-wide blobUrl | **Fixed** — open with `replacements: false`; no eager archive blob map |
+| P1 ZIP metadata size ceiling | **Fixed** — max 2 MiB uncompressed container/OPF before/after read |
+| P1 progress flush drop | **Fixed** — drain loop after in-flight save |
+| P1 1×1 icons | **Fixed** — real 192/512/maskable PNGs via `npm run icons` |
+| P1 session-only IDB fallback | **Fixed** — probe + in-memory repository + UI warning |
+| P2 stale `currentLocation` | **Fixed** — generation + rendition identity check |
+| P2 getBook rewrites EPUB | **Fixed** — metadata-only `lastOpenedAt` update |
+| P2 share expire TX | **Fixed** — read then write transactions |
+| P2 clear share query early | **Fixed** — clear after successful promote |
+| P2 external links | **Fixed** — `target=_blank` + `rel=noopener noreferrer` |
+| P2 epubjs/xmldom audit | **Open** — still depends on pinned epubjs; document risk, no silent fork yet |
+| E2E test-gap hardening | **Partial** — unit coverage added; full E2E matrix should be re-run before ship |
+
+Unit/integration gate after remediation: **106** tests pass; shell gzip **56633** (budget 153600). Re-run `npm run test:e2e` before approving deploy.

@@ -24,22 +24,34 @@ export interface ChapterTransformResult {
   dispose(): void;
 }
 
-const REMOVE_TAGS = [
+/** Local names removed case-insensitively (HTML + XHTML). */
+const REMOVE_LOCAL_NAMES = new Set([
   "script",
   "iframe",
   "object",
   "embed",
   "form",
   "base",
-] as const;
+  "applet",
+  "frame",
+  "frameset",
+  "video",
+  "audio",
+  "source",
+  "track",
+  "portal",
+]);
 
-const SVG_REMOVE_TAGS = [
+const SVG_REMOVE_LOCAL_NAMES = new Set([
   "animate",
-  "animateTransform",
-  "animateMotion",
+  "animatetransform",
+  "animatemotion",
   "set",
-  "foreignObject",
-] as const;
+  "foreignobject",
+  "use", // can reference external documents
+  "handler",
+  "script",
+]);
 
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 const GATE_LABEL = "點擊顯示圖片";
@@ -57,9 +69,12 @@ export function transformChapter(
   stripEventHandlers(document);
   neutralizeJavascriptUrls(document);
   stripRemoteStylesheets(document, resolveArchiveUrl);
+  sanitizeInlineStyles(document);
   gateImages(document, resolveArchiveUrl, disposers, () => disposed);
   gateSvgImages(document, resolveArchiveUrl, disposers, () => disposed);
   stripPictureSources(document);
+  stripMediaFetchAttributes(document);
+  secureExternalLinks(document);
 
   return makeDisposable(disposers, () => disposed, (value) => {
     disposed = value;
@@ -208,18 +223,93 @@ function makeDisposable(
 }
 
 function stripHostileElements(doc: Document): void {
-  for (const tag of REMOVE_TAGS) {
-    for (const el of Array.from(doc.getElementsByTagName(tag))) {
-      el.remove();
+  // Walk every element and match by localName (case-insensitive). This catches
+  // XHTML `<SCRIPT>`, namespaced SVG active content, and HTML parsers alike —
+  // getElementsByTagName("script") can miss case variants in XML documents.
+  const toRemove: Element[] = [];
+  const root = doc.documentElement;
+  if (!root) return;
+
+  const walk = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let node: Element | null = walk.currentNode as Element;
+  while (node) {
+    const local = (node.localName || node.tagName || "").toLowerCase();
+    if (REMOVE_LOCAL_NAMES.has(local) || SVG_REMOVE_LOCAL_NAMES.has(local)) {
+      toRemove.push(node);
+    }
+    node = walk.nextNode() as Element | null;
+  }
+
+  for (const el of toRemove) {
+    el.remove();
+  }
+}
+
+/**
+ * Neutralize CSS that can fetch remote resources: @import and url(http...).
+ * Full CSS parsing is out of scope; aggressive string neutralization is used.
+ */
+function sanitizeInlineStyles(doc: Document): void {
+  for (const style of Array.from(doc.getElementsByTagName("style"))) {
+    const text = style.textContent ?? "";
+    if (!text) continue;
+    let next = text.replace(/@import\b[^;]+;?/gi, "/* stripped import */");
+    next = next.replace(
+      /url\s*\(\s*['"]?\s*(https?:|\/\/|javascript:)[^)]*\)/gi,
+      "url(about:blank)",
+    );
+    if (next !== text) {
+      style.textContent = next;
     }
   }
-  for (const tag of SVG_REMOVE_TAGS) {
-    for (const el of Array.from(doc.getElementsByTagName(tag))) {
-      el.remove();
+
+  for (const el of Array.from(doc.querySelectorAll("[style]"))) {
+    const style = el.getAttribute("style");
+    if (!style) continue;
+    if (
+      /@import/i.test(style) ||
+      /url\s*\(\s*['"]?\s*(https?:|\/\/|javascript:)/i.test(style)
+    ) {
+      el.setAttribute(
+        "style",
+        style
+          .replace(/@import\b[^;]+;?/gi, "")
+          .replace(
+            /url\s*\(\s*['"]?\s*(https?:|\/\/|javascript:)[^)]*\)/gi,
+            "url(about:blank)",
+          ),
+      );
     }
-    // SVG elements may be retrieved case-sensitively in XML documents.
-    for (const el of Array.from(doc.getElementsByTagNameNS("http://www.w3.org/2000/svg", tag))) {
-      el.remove();
+  }
+}
+
+function stripMediaFetchAttributes(doc: Document): void {
+  // Any remaining media-like elements should not auto-fetch.
+  for (const el of Array.from(
+    doc.querySelectorAll("video, audio, source, track, embed, object"),
+  )) {
+    el.removeAttribute("src");
+    el.removeAttribute("srcset");
+    el.removeAttribute("poster");
+    el.removeAttribute("data");
+  }
+}
+
+/**
+ * External http(s) hyperlinks require an explicit opener-safe exit: keep the
+ * URL but force new-tab + rel=noopener noreferrer, and mark for app chrome.
+ */
+function secureExternalLinks(doc: Document): void {
+  for (const anchor of Array.from(doc.getElementsByTagName("a"))) {
+    const href = anchor.getAttribute("href");
+    if (!href) continue;
+    const trimmed = href.trim();
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("http:") || lower.startsWith("https:")) {
+      anchor.setAttribute("target", "_blank");
+      anchor.setAttribute("rel", "noopener noreferrer");
+      // Prevent in-iframe navigation if the host ignores target.
+      anchor.setAttribute("data-epub-external", "1");
     }
   }
 }

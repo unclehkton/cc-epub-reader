@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import type {
+  BookMeta,
   LibraryBook,
   StoredBook,
   StoredProgress,
@@ -12,7 +13,8 @@ import { StorageNotice } from "./storage-notice";
 import { validateEpub } from "./epub-validator";
 
 export interface BookSelection {
-  book: StoredBook;
+  /** May be metadata-only from the list; App must getBook() before reading. */
+  book: BookMeta | StoredBook;
   progress?: StoredProgress;
 }
 
@@ -26,10 +28,13 @@ export interface LibraryRepository {
 export interface LibraryScreenProps {
   repository: LibraryRepository;
   onOpenBook: (selection: BookSelection) => void;
+  /** When true, imports stay in-session only (IndexedDB unavailable). */
+  sessionOnly?: boolean;
+  sessionOnlyMessage?: string | null;
 }
 
 interface PendingDelete {
-  book: StoredBook;
+  book: BookMeta;
   overflowButton: HTMLButtonElement;
 }
 
@@ -47,6 +52,8 @@ async function requestPersistentStorage(): Promise<void> {
 export function LibraryScreen({
   repository,
   onOpenBook,
+  sessionOnly = false,
+  sessionOnlyMessage = null,
 }: LibraryScreenProps) {
   const [books, setBooks] = useState<LibraryBook[]>([]);
   const [loading, setLoading] = useState(true);
@@ -157,6 +164,12 @@ export function LibraryScreen({
         <h1>你的書庫</h1>
         <p class="library-privacy">書籍只會儲存在此裝置</p>
         <StorageNotice />
+        {sessionOnly || sessionOnlyMessage ? (
+          <p class="library-session-only" role="status">
+            {sessionOnlyMessage ??
+              "目前無法使用持久儲存，書籍與進度只會保留在這個瀏覽階段，重新載入後會消失。"}
+          </p>
+        ) : null}
         <p class="library-count" aria-live="polite">
           {loading ? "載入中…" : bookCountLabel}
         </p>

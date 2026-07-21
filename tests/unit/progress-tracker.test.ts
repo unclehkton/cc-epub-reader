@@ -51,6 +51,44 @@ describe("ProgressTracker", () => {
     vi.restoreAllMocks();
   });
 
+  it("drains pending progress written during an in-flight save", async () => {
+    const saves: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let saveCount = 0;
+
+    const save = vi.fn(async (progress: StoredProgress) => {
+      saveCount += 1;
+      saves.push(progress.cfi ?? "");
+      if (saveCount === 1) {
+        await firstGate;
+      }
+    });
+
+    const tracker = createProgressTracker({
+      bookId: "book-1",
+      save,
+    });
+
+    tracker.onRelocated(location({ cfi: "cfi-stale", approximatePercent: 10 }));
+    const firstFlush = tracker.flush();
+
+    // While first save is in flight, a newer position arrives.
+    tracker.onRelocated(location({ cfi: "cfi-fresh", approximatePercent: 55 }));
+    releaseFirst();
+    await firstFlush;
+
+    // A pagehide-style second flush must persist the fresher snapshot.
+    await tracker.flush();
+
+    expect(saves).toContain("cfi-stale");
+    expect(saves).toContain("cfi-fresh");
+    expect(saves[saves.length - 1]).toBe("cfi-fresh");
+    tracker.destroy();
+  });
+
   it("debounces persistence with a 300 ms trailing window", async () => {
     const saves: StoredProgress[] = [];
     const save = vi.fn(async (progress: StoredProgress) => {

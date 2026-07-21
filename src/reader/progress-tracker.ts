@@ -105,26 +105,30 @@ class ProgressTrackerImpl implements ProgressTracker {
   async flush(): Promise<void> {
     if (this.destroyed) return;
     this.clearTimer();
-    if (!this.pending) return;
 
+    // Wait for any in-flight write, then drain whatever is still pending
+    // (including snapshots written while that write was running).
     if (this.flushPromise) {
       await this.flushPromise;
-      return;
+      if (this.destroyed) return;
     }
 
-    const snapshot = this.pending;
-    this.pending = null;
-    this.flushPromise = this.saveFn(snapshot)
-      .catch(() => {
-        // Best-effort persistence; restore pending so a later flush can retry.
-        if (!this.destroyed && !this.pending) {
-          this.pending = snapshot;
-        }
-      })
-      .finally(() => {
-        this.flushPromise = null;
-      });
-    await this.flushPromise;
+    // Loop so a pending value that arrives during save is not dropped.
+    while (!this.destroyed && this.pending) {
+      const snapshot = this.pending;
+      this.pending = null;
+      this.flushPromise = this.saveFn(snapshot)
+        .catch(() => {
+          // Best-effort persistence; restore pending so a later flush can retry.
+          if (!this.destroyed && !this.pending) {
+            this.pending = snapshot;
+          }
+        })
+        .finally(() => {
+          this.flushPromise = null;
+        });
+      await this.flushPromise;
+    }
   }
 
   attachLifecycle(target: Window & typeof globalThis = window): () => void {
