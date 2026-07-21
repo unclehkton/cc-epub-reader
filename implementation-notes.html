@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en-HK">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Books — Implementation Notes</title>
+  <style>body{max-width:900px;margin:3rem auto;padding:0 1.25rem;color:#18342d;background:#f7f5ed;font:16px/1.65 system-ui,sans-serif}h1,h2{font-family:Georgia,"Noto Serif TC",serif}code{background:#e8e5d8;padding:.15rem .35rem;border-radius:.25rem}a{color:#205f50}</style>
+</head>
+<body>
+  <h1>Books implementation notes</h1>
+  <p><strong>Working convention:</strong> Read this file before making meaningful project changes. Update it with fresh verification evidence before declaring work complete.</p>
+
+  <h2>What changed</h2>
+  <p>On 2026-07-21, the Release 0.1 design was approved for a privacy-first, browser-local PWA EPUB reader. The approved revision adds a multi-book reading-list library, per-book progress, explicit deletion, and an installed-PWA share target where supported.</p>
+
+  <h2>Why it changed</h2>
+  <p>The original single-retained-book design did not meet the clarified requirement that every imported book remain available until the reader deletes it.</p>
+
+  <h2>Important decisions and trade-offs</h2>
+  <ul>
+    <li>EPUB files are stored as <code>Blob</code> values in IndexedDB, not uploaded or exposed as normal filesystem files.</li>
+    <li>Each import creates a separate entry. No whole-file hashing or automatic duplicate merging is performed.</li>
+    <li>The library uses title-first rows and generated typographic glyphs instead of decoded cover images.</li>
+    <li>Web Share Target is progressive enhancement; the in-app file picker remains the iPhone-compatible baseline.</li>
+    <li>Shared POST bodies must be intercepted locally by the service worker and must never fall through to Cloudflare Pages.</li>
+  </ul>
+
+  <h2>Related documents</h2>
+  <ul>
+    <li><a href="docs/superpowers/specs/2026-07-21-pwa-epub-reader-design.md">Approved product and architecture design</a></li>
+    <li><a href="docs/superpowers/specs/2026-07-21-pwa-epub-reader-eng-review.md">Engineering review</a></li>
+  </ul>
+
+  <h2>Verification</h2>
+  <p>Design-document whitespace verification: <code>git diff --check</code> passed on 2026-07-21. Production implementation and runtime verification have not started.</p>
+
+  <h2>Follow-up tasks</h2>
+  <ol>
+    <li>Write and approve the executable TDD implementation plan.</li>
+    <li>Implement the application test-first.</li>
+    <li>Run local, browser, offline, and deployment verification and record the evidence here.</li>
+  </ol>
+</body>
+</html>
