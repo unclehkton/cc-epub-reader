@@ -20,8 +20,17 @@ import {
 
 export type { ArchiveResolver };
 
+/** Optional on-demand blob materializer for package-relative data-epub-src values. */
+export type MaterializeArchiveUrl = (
+  packagePath: string,
+) => Promise<string | null>;
+
 export interface ChapterTransformResult {
   dispose(): void;
+}
+
+export interface TransformOptions {
+  materializeArchiveUrl?: MaterializeArchiveUrl;
 }
 
 /** Local names removed case-insensitively (HTML + XHTML). */
@@ -59,9 +68,11 @@ const GATE_LABEL = "點擊顯示圖片";
 export function transformChapter(
   document: Document,
   resolveArchiveUrl: ArchiveResolver,
+  options: TransformOptions = {},
 ): ChapterTransformResult {
   const disposers: Array<() => void> = [];
   let disposed = false;
+  const materialize = options.materializeArchiveUrl;
 
   stripHostileElements(document);
   stripMetaRefresh(document);
@@ -70,8 +81,8 @@ export function transformChapter(
   neutralizeJavascriptUrls(document);
   stripRemoteStylesheets(document, resolveArchiveUrl);
   sanitizeInlineStyles(document);
-  gateImages(document, resolveArchiveUrl, disposers, () => disposed);
-  gateSvgImages(document, resolveArchiveUrl, disposers, () => disposed);
+  gateImages(document, resolveArchiveUrl, disposers, () => disposed, materialize);
+  gateSvgImages(document, resolveArchiveUrl, disposers, () => disposed, materialize);
   stripPictureSources(document);
   stripMediaFetchAttributes(document);
   secureExternalLinks(document);
@@ -90,10 +101,14 @@ export function transformChapter(
  * Also installs a document-level delegated click handler so WebKit still reveals
  * images when per-button listeners are dropped by iframe document swaps.
  */
-export function rebindImageGates(document: Document): ChapterTransformResult {
+export function rebindImageGates(
+  document: Document,
+  options: TransformOptions = {},
+): ChapterTransformResult {
   const disposers: Array<() => void> = [];
   let disposed = false;
   const isDisposed = () => disposed;
+  const materialize = options.materializeArchiveUrl;
 
   const bindButton = (
     button: Element,
@@ -123,7 +138,7 @@ export function rebindImageGates(document: Document): ChapterTransformResult {
       const img = next as HTMLImageElement;
       if (img.getAttribute("data-epub-src") || img.getAttribute("data-epub-srcset")) {
         bindButton(button, () => {
-          revealHtmlImage(img);
+          void revealHtmlImage(img, materialize);
         });
       }
       continue;
@@ -140,7 +155,7 @@ export function rebindImageGates(document: Document): ChapterTransformResult {
       const gated = images.find((el) => el.getAttribute("data-epub-src"));
       if (gated) {
         bindButton(button, () => {
-          revealSvgImage(gated);
+          void revealSvgImage(gated, materialize);
         });
       }
     }
@@ -161,7 +176,7 @@ export function rebindImageGates(document: Document): ChapterTransformResult {
       if (img.getAttribute("data-epub-src") || img.getAttribute("data-epub-srcset")) {
         event.preventDefault();
         event.stopPropagation();
-        revealHtmlImage(img);
+        void revealHtmlImage(img, materialize);
       }
       return;
     }
@@ -176,7 +191,7 @@ export function rebindImageGates(document: Document): ChapterTransformResult {
       if (gated) {
         event.preventDefault();
         event.stopPropagation();
-        revealSvgImage(gated);
+        void revealSvgImage(gated, materialize);
       }
     }
   };
@@ -418,6 +433,7 @@ function gateImages(
   resolve: ArchiveResolver,
   disposers: Array<() => void>,
   isDisposed: () => boolean,
+  materialize?: MaterializeArchiveUrl,
 ): void {
   for (const img of Array.from(doc.getElementsByTagName("img"))) {
     const rawSrc = img.getAttribute("src");
@@ -447,7 +463,7 @@ function gateImages(
       continue;
     }
 
-    installImageGate(doc, img, disposers, isDisposed);
+    installImageGate(doc, img, disposers, isDisposed, materialize);
   }
 }
 
@@ -456,6 +472,7 @@ function gateSvgImages(
   resolve: ArchiveResolver,
   disposers: Array<() => void>,
   isDisposed: () => boolean,
+  materialize?: MaterializeArchiveUrl,
 ): void {
   const images = [
     ...Array.from(doc.getElementsByTagName("image")),
@@ -482,7 +499,7 @@ function gateSvgImages(
     const safe = resolveArchiveCandidate(rawHref, resolve);
     if (safe) {
       image.setAttribute("data-epub-src", safe);
-      installSvgImageGate(doc, image, disposers, isDisposed);
+      installSvgImageGate(doc, image, disposers, isDisposed, materialize);
     } else {
       image.removeAttribute("data-epub-src");
     }
@@ -503,6 +520,7 @@ function installImageGate(
   img: HTMLImageElement,
   disposers: Array<() => void>,
   isDisposed: () => boolean,
+  materialize?: MaterializeArchiveUrl,
 ): void {
   const button = doc.createElement("button");
   button.type = "button";
@@ -513,7 +531,7 @@ function installImageGate(
     event.preventDefault();
     event.stopPropagation();
     if (isDisposed()) return;
-    revealHtmlImage(img);
+    void revealHtmlImage(img, materialize);
   };
 
   button.addEventListener("click", onClick);
@@ -533,6 +551,7 @@ function installSvgImageGate(
   image: Element,
   disposers: Array<() => void>,
   isDisposed: () => boolean,
+  materialize?: MaterializeArchiveUrl,
 ): void {
   // SVG <image> cannot host a HTML button child reliably in all contexts.
   // Place an HTML button as a previous sibling when the parent allows it;
@@ -548,7 +567,7 @@ function installSvgImageGate(
     event.preventDefault();
     event.stopPropagation();
     if (isDisposed()) return;
-    revealSvgImage(image);
+    void revealSvgImage(image, materialize);
   };
 
   button.addEventListener("click", onClick);
@@ -565,19 +584,51 @@ function installSvgImageGate(
   }
 }
 
-function revealHtmlImage(img: HTMLImageElement): void {
+async function revealHtmlImage(
+  img: HTMLImageElement,
+  materialize?: MaterializeArchiveUrl,
+): Promise<void> {
   const storedSrc = validateRestorableUrl(img.getAttribute("data-epub-src"));
   const storedSrcset = img.getAttribute("data-epub-srcset");
 
   if (storedSrc) {
-    img.setAttribute("src", storedSrc);
+    let src = storedSrc;
+    if (!storedSrc.startsWith("blob:") && materialize) {
+      const materialized = await materialize(storedSrc);
+      if (materialized) {
+        src = materialized;
+      }
+    }
+    img.setAttribute("src", src);
   }
 
   if (storedSrcset) {
     // Re-validate each URL token in the stored srcset.
     const safe = revalidateStoredSrcset(storedSrcset);
     if (safe) {
-      img.setAttribute("srcset", safe);
+      // Materialize package paths in srcset when needed.
+      if (materialize && !safe.includes("blob:")) {
+        const parts = safe.split(",");
+        const out: string[] = [];
+        for (const part of parts) {
+          const trimmed = part.trim();
+          const tokens = trimmed.split(/\s+/);
+          const url = tokens[0];
+          if (!url) continue;
+          let resolved = url;
+          if (!url.startsWith("blob:")) {
+            const m = await materialize(url);
+            if (m) resolved = m;
+          }
+          const descriptors = tokens.slice(1).join(" ");
+          out.push(descriptors ? `${resolved} ${descriptors}` : resolved);
+        }
+        if (out.length > 0) {
+          img.setAttribute("srcset", out.join(", "));
+        }
+      } else {
+        img.setAttribute("srcset", safe);
+      }
     }
   }
 
@@ -600,13 +651,21 @@ function revealHtmlImage(img: HTMLImageElement): void {
   }
 }
 
-function revealSvgImage(image: Element): void {
+async function revealSvgImage(
+  image: Element,
+  materialize?: MaterializeArchiveUrl,
+): Promise<void> {
   const stored = validateRestorableUrl(image.getAttribute("data-epub-src"));
   if (!stored) return;
-  image.setAttribute("href", stored);
+  let href = stored;
+  if (!stored.startsWith("blob:") && materialize) {
+    const materialized = await materialize(stored);
+    if (materialized) href = materialized;
+  }
+  image.setAttribute("href", href);
   // Some SVG consumers still read xlink:href.
   try {
-    image.setAttributeNS(XLINK_NS, "href", stored);
+    image.setAttributeNS(XLINK_NS, "href", href);
   } catch {
     // ignore namespace failures in non-SVG contexts
   }

@@ -22,6 +22,7 @@ import {
   createArchiveResolver,
   DEFAULT_RENDITION_OPTIONS,
   loadEpubFactory,
+  materializeArchiveUrl,
   type AdaptedBook,
   type AdaptedLocation,
   type AdaptedNavItem,
@@ -128,6 +129,8 @@ class ReaderSessionImpl implements ReaderSession {
   private appearance: AppearanceSettings;
   private readonly listeners = new Set<(event: ReaderEvent) => void>();
   private readonly ownedObjectUrls = new Set<string>();
+  /** Blob URLs created for the active chapter's revealed images only. */
+  private readonly chapterObjectUrls = new Set<string>();
   private readonly converter = new ChapterConverter();
   private transformResult: ChapterTransformResult | null = null;
   private spineContentHook: ((...args: unknown[]) => unknown) | null = null;
@@ -448,7 +451,25 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.transformResult = null;
     }
-    this.transformResult = rebindImageGates(doc);
+    this.transformResult = rebindImageGates(doc, {
+      materializeArchiveUrl: this.makeMaterialize(),
+    });
+  }
+
+  private makeMaterialize():
+    | ((packagePath: string) => Promise<string | null>)
+    | undefined {
+    const book = this.book;
+    if (!book) return undefined;
+    const chapterUrls = this.chapterObjectUrls;
+    const owned = this.ownedObjectUrls;
+    return async (packagePath: string) => {
+      const url = await materializeArchiveUrl(book, packagePath, chapterUrls);
+      if (url?.startsWith("blob:")) {
+        owned.add(url);
+      }
+      return url;
+    };
   }
 
   private createRendition(book: AdaptedBook): AdaptedRendition {
@@ -456,14 +477,15 @@ class ReaderSessionImpl implements ReaderSession {
       ...DEFAULT_RENDITION_OPTIONS,
       flow: this.flow === "scrolled" ? "scrolled-doc" : "paginated",
       spread: "none",
-      allowScriptedContent: false,
+      allowScriptedContent: true,
       width: "100%",
       height: "100%",
     };
 
     const rendition = book.renderTo(this.element, options);
     if (rendition.settings) {
-      rendition.settings.allowScriptedContent = false;
+      // See DEFAULT_RENDITION_OPTIONS — sanitizer is the content control.
+      rendition.settings.allowScriptedContent = true;
     }
     return rendition;
   }
@@ -516,7 +538,6 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   private registerSpineTransform(book: AdaptedBook): void {
-    const owned = this.ownedObjectUrls;
     const hook = (...args: unknown[]): void => {
       const doc = args[0];
       if (!doc || typeof doc !== "object") return;
@@ -530,8 +551,21 @@ class ReaderSessionImpl implements ReaderSession {
         }
         this.transformResult = null;
       }
-      const resolve = createArchiveResolver(book, owned);
-      this.transformResult = transformChapter(document, resolve);
+      this.revokeChapterObjectUrls();
+      const resolve = createArchiveResolver(book);
+      this.transformResult = transformChapter(document, resolve, {
+        materializeArchiveUrl: async (packagePath) => {
+          const url = await materializeArchiveUrl(
+            book,
+            packagePath,
+            this.chapterObjectUrls,
+          );
+          if (url?.startsWith("blob:")) {
+            this.ownedObjectUrls.add(url);
+          }
+          return url;
+        },
+      });
     };
     this.spineContentHook = hook;
     book.spine.hooks.content.register(hook);
@@ -547,6 +581,20 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.transformResult = null;
     }
+    this.revokeChapterObjectUrls();
+  }
+
+  private revokeChapterObjectUrls(): void {
+    const revoke = getRevokeObjectURL();
+    for (const url of this.chapterObjectUrls) {
+      try {
+        revoke(url);
+      } catch {
+        // ignore
+      }
+      this.ownedObjectUrls.delete(url);
+    }
+    this.chapterObjectUrls.clear();
   }
 
   private async teardownBook(): Promise<void> {

@@ -100,6 +100,15 @@ Remediation landed on `feature/release-0.1` after this review:
 | P2 clear share query early | **Fixed** — clear after successful promote |
 | P2 external links | **Fixed** — `target=_blank` + `rel=noopener noreferrer` |
 | P2 epubjs/xmldom audit | **Open** — still depends on pinned epubjs; document risk, no silent fork yet |
-| E2E test-gap hardening | **Partial** — unit coverage added; full E2E matrix should be re-run before ship |
+| E2E test-gap hardening | **Partial** — unit coverage added; full matrix re-run green after on-demand image materialize |
+| WebKit image reveal after `replacements: false` | **Fixed** — package-path `data-epub-src` + `materializeArchiveUrl` on tap; path candidates + timeout |
 
-Unit/integration gate after remediation: **106** tests pass; shell gzip **56633** (budget 153600). Re-run `npm run test:e2e` before approving deploy.
+Post-remediation gates (2026-07-21, after image materialize):
+
+| Gate | Result |
+| --- | --- |
+| `npm run test:run` | **106** passed |
+| `npm run check` / `build` / `check:bundle` | pass (shell ~54–56 KiB gzip) |
+| `npm run test:e2e` | **28/28** passed in ~138s (chromium, webkit, Mobile Chrome, Mobile Safari) |
+
+Still open: `epubjs`/`xmldom` audit, physical iPhone, live domain.

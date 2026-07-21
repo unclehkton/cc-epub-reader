@@ -174,9 +174,10 @@ export const DEFAULT_RENDITION_OPTIONS: RenditionCreateOptions = {
   flow: "paginated",
   spread: "none",
   manager: "default",
-  // Never enable EPUB script execution. Image gates are bound from the app
-  // after render; hostile content is stripped pre-serialization.
-  allowScriptedContent: false,
+  // Sandbox allows scripts so image-gate listeners work in WebKit iframes.
+  // Primary security control is pre-serialization transformChapter (hostile
+  // scripts/tags/CSS imports stripped). EPUB package scripts must not run.
+  allowScriptedContent: true,
 };
 
 /**
@@ -253,38 +254,29 @@ export async function loadEpubFactory(): Promise<EpubFactory> {
 }
 
 /**
- * Build a synchronous archive-local URL map from an opened book's resources.
- * Prefer blob/data replacement URLs already produced by EPUB.js; fall back to
- * package-relative hrefs that remain archive-local.
+ * Build a package-path map from an opened book's resource inventory.
+ * Values are always package-relative hrefs — never archive-wide blob replacements.
  */
 export function buildArchiveUrlMap(book: AdaptedBook): Map<string, string> {
   const map = new Map<string, string>();
   const urls = book.resources?.urls ?? [];
-  const replacements = book.resources?.replacementUrls ?? [];
 
-  for (let i = 0; i < urls.length; i += 1) {
-    const href = urls[i];
+  for (const href of urls) {
     if (!href) continue;
-    const replacement = replacements[i];
-    const value =
-      typeof replacement === "string" && replacement.trim()
-        ? replacement
-        : href;
-    map.set(href, value);
+    // Always store the package path itself (chapter-scoped materialization later).
+    map.set(href, href);
 
-    // Also index by final path segment for chapter-relative references.
     const slash = href.lastIndexOf("/");
     if (slash >= 0) {
       const base = href.slice(slash + 1);
       if (base && !map.has(base)) {
-        map.set(base, value);
+        map.set(base, href);
       }
-      // Common chapter-relative form: images/foo.png when href is OEBPS/images/foo.png
       const imagesIdx = href.indexOf("images/");
       if (imagesIdx >= 0) {
         const rel = href.slice(imagesIdx);
         if (!map.has(rel)) {
-          map.set(rel, value);
+          map.set(rel, href);
         }
       }
     }
@@ -294,12 +286,13 @@ export function buildArchiveUrlMap(book: AdaptedBook): Map<string, string> {
 }
 
 /**
- * Create an ArchiveResolver that only returns EPUB archive-local resources.
- * Remote / absolute network URLs never pass through (callers also policy-check).
+ * Create an ArchiveResolver that returns package-local paths only.
+ * Blob object URLs are created later on explicit image reveal via
+ * {@link materializeArchiveUrl}, not for the whole archive at open.
  */
 export function createArchiveResolver(
   book: AdaptedBook,
-  ownedObjectUrls?: Set<string>,
+  _ownedObjectUrls?: Set<string>,
 ): (rawUrl: string) => string | null {
   const map = buildArchiveUrlMap(book);
 
@@ -307,39 +300,25 @@ export function createArchiveResolver(
     const trimmed = rawUrl.trim();
     if (!trimmed) return null;
 
-    // Direct map hits.
     const direct = map.get(trimmed);
-    if (direct) {
-      trackIfBlob(direct, ownedObjectUrls);
-      return direct;
-    }
+    if (direct) return direct;
 
-    // Strip leading ./ 
     const noDot = trimmed.replace(/^\.\//, "");
     const noDotHit = map.get(noDot);
-    if (noDotHit) {
-      trackIfBlob(noDotHit, ownedObjectUrls);
-      return noDotHit;
-    }
+    if (noDotHit) return noDotHit;
 
-    // Resolve via book.resolve when available.
     if (typeof book.resolve === "function") {
       try {
         const resolved = book.resolve(trimmed);
         if (resolved) {
           const byResolved = map.get(resolved);
-          if (byResolved) {
-            trackIfBlob(byResolved, ownedObjectUrls);
-            return byResolved;
-          }
-          // Match path suffix against known package hrefs.
+          if (byResolved) return byResolved;
           for (const [href, value] of map) {
             if (
               resolved.endsWith(href) ||
               href.endsWith(noDot) ||
               resolved.endsWith(noDot)
             ) {
-              trackIfBlob(value, ownedObjectUrls);
               return value;
             }
           }
@@ -349,7 +328,6 @@ export function createArchiveResolver(
       }
     }
 
-    // Suffix / basename matching for relative chapter paths.
     for (const [href, value] of map) {
       if (
         href === noDot ||
@@ -357,30 +335,93 @@ export function createArchiveResolver(
         noDot.endsWith("/" + href) ||
         href.endsWith(noDot)
       ) {
-        trackIfBlob(value, ownedObjectUrls);
         return value;
       }
     }
 
-    // Archive-local relative path with no network scheme: allow as restorable
-    // package path only when it does not escape with a scheme.
     if (
       !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) &&
       !trimmed.startsWith("//") &&
       !trimmed.includes("\\")
     ) {
-      // Only accept if we have some evidence it belongs to the package, or
-      // when the book has no resource map yet (empty assets).
       if (map.size === 0) {
         return noDot;
       }
-      // Reject unknown paths when we do have a resource inventory — prevents
-      // restoring arbitrary strings that are not package assets.
       return null;
     }
 
     return null;
   };
+}
+
+/**
+ * Create a blob/object URL for one package path when the reader reveals an image.
+ * Tracks the URL for later revoke on chapter/session teardown.
+ */
+export async function materializeArchiveUrl(
+  book: AdaptedBook,
+  packagePath: string,
+  ownedObjectUrls?: Set<string>,
+): Promise<string | null> {
+  const path = packagePath.trim();
+  if (!path) return null;
+  if (path.startsWith("blob:") || path.startsWith("data:")) {
+    return path;
+  }
+  if (/^https?:/i.test(path) || path.startsWith("//") || /^javascript:/i.test(path)) {
+    return null;
+  }
+
+  const candidates = new Set<string>([path]);
+  if (typeof book.resolve === "function") {
+    try {
+      const resolved = book.resolve(path);
+      if (resolved) candidates.add(resolved);
+    } catch {
+      // ignore
+    }
+  }
+  // Common package layouts.
+  if (!path.includes("/")) {
+    candidates.add(`images/${path}`);
+    candidates.add(`OEBPS/images/${path}`);
+  } else if (path.startsWith("images/")) {
+    candidates.add(`OEBPS/${path}`);
+  } else if (!path.startsWith("OEBPS/")) {
+    candidates.add(`OEBPS/${path}`);
+  }
+
+  const create =
+    typeof book.archive?.createUrl === "function"
+      ? (p: string) => book.archive!.createUrl!(p)
+      : typeof book.resources?.createUrl === "function"
+        ? (p: string) => book.resources!.createUrl!(p)
+        : null;
+
+  if (create) {
+    for (const candidate of candidates) {
+      try {
+        const url = await Promise.race([
+          create(candidate),
+          new Promise<string>((_, reject) => {
+            setTimeout(() => reject(new Error("createUrl timeout")), 4000);
+          }),
+        ]);
+        if (typeof url === "string" && url.trim()) {
+          const out = url.trim();
+          if (ownedObjectUrls && out.startsWith("blob:")) {
+            ownedObjectUrls.add(out);
+          }
+          return out;
+        }
+      } catch {
+        // try next candidate
+      }
+    }
+  }
+
+  // Last resort: first package-relative candidate (some engines resolve via base).
+  return path;
 }
 
 function trackIfBlob(url: string, owned?: Set<string>): void {

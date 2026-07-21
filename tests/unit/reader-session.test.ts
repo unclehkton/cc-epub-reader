@@ -406,9 +406,8 @@ describe("ReaderSession generation ownership", () => {
       expect(img.getAttribute("src")).toBeNull();
     }
     const local = doc.querySelector("img[data-epub-src]");
-    expect(local?.getAttribute("data-epub-src")).toBe(
-      "blob:fake-archive/images/a.png",
-    );
+    // Package path is stored; blob materialization happens only on reveal.
+    expect(local?.getAttribute("data-epub-src")).toBe("images/a.png");
 
     session.destroy();
   });

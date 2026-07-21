@@ -150,7 +150,7 @@ export async function clickImageGate(page: Page): Promise<void> {
         if ((await gate.count()) > 0) {
           // force: WebKit iframe hit-testing can be flaky with EPUB.js overlays.
           await gate.first().click({ force: true });
-          // Also dispatch a DOM click in-frame as a WebKit fallback.
+          // WebKit fallback: dispatch click + pointerup (listeners use both).
           await frame.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll("button"));
             const target = buttons.find(
@@ -158,10 +158,17 @@ export async function clickImageGate(page: Page): Promise<void> {
                 (b.getAttribute("aria-label") || "").includes("點擊顯示圖片") ||
                 (b.textContent || "").includes("點擊顯示圖片"),
             );
-            target?.dispatchEvent(
+            if (!target) return;
+            target.dispatchEvent(
+              new PointerEvent("pointerup", { bubbles: true, cancelable: true }),
+            );
+            target.dispatchEvent(
               new MouseEvent("click", { bubbles: true, cancelable: true }),
             );
+            target.click();
           });
+          // Give async materializeArchiveUrl time to set img[src].
+          await page.waitForTimeout(500);
           return;
         }
       } catch {
