@@ -23,6 +23,7 @@ import {
   DEFAULT_RENDITION_OPTIONS,
   loadEpubFactory,
   materializeArchiveUrl,
+  purgeArchiveUrlCache,
   type AdaptedBook,
   type AdaptedLocation,
   type AdaptedNavItem,
@@ -193,7 +194,7 @@ class ReaderSessionImpl implements ReaderSession {
         throw staleError();
       }
 
-      const book = factory(buffer, { replacements: false });
+      const book = factory(buffer, { replacements: "none" });
       this.book = book;
       this.registerSpineTransform(book);
 
@@ -484,7 +485,7 @@ class ReaderSessionImpl implements ReaderSession {
 
     const rendition = book.renderTo(this.element, options);
     if (rendition.settings) {
-      // See DEFAULT_RENDITION_OPTIONS — sanitizer is the content control.
+      // See DEFAULT_RENDITION_OPTIONS — chapter CSP + sanitizer block package scripts.
       rendition.settings.allowScriptedContent = true;
     }
     return rendition;
@@ -586,6 +587,7 @@ class ReaderSessionImpl implements ReaderSession {
 
   private revokeChapterObjectUrls(): void {
     const revoke = getRevokeObjectURL();
+    const revoked: string[] = [];
     for (const url of this.chapterObjectUrls) {
       try {
         revoke(url);
@@ -593,8 +595,13 @@ class ReaderSessionImpl implements ReaderSession {
         // ignore
       }
       this.ownedObjectUrls.delete(url);
+      revoked.push(url);
     }
     this.chapterObjectUrls.clear();
+    // EPUB.js caches createUrl results; purge dead blobs so re-entry re-creates.
+    if (this.book && revoked.length > 0) {
+      purgeArchiveUrlCache(this.book, revoked);
+    }
   }
 
   private async teardownBook(): Promise<void> {

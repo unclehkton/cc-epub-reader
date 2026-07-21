@@ -86,6 +86,9 @@ export function transformChapter(
   stripPictureSources(document);
   stripMediaFetchAttributes(document);
   secureExternalLinks(document);
+  // Defense-in-depth: block package scripts even if the iframe sandbox allows
+  // scripts so parent-attached image-gate listeners can run (WebKit).
+  installChapterContentSecurityPolicy(document);
 
   return makeDisposable(disposers, () => disposed, (value) => {
     disposed = value;
@@ -120,12 +123,10 @@ export function rebindImageGates(
       if (isDisposed()) return;
       activate();
     };
+    // Click only — dual pointerup+click double-materializes on a single tap.
     button.addEventListener("click", onClick);
-    // Pointer events are more reliable than click alone in some WebKit builds.
-    button.addEventListener("pointerup", onClick);
     disposers.push(() => {
       button.removeEventListener("click", onClick);
-      button.removeEventListener("pointerup", onClick);
     });
   };
 
@@ -237,71 +238,116 @@ function makeDisposable(
   };
 }
 
-function stripHostileElements(doc: Document): void {
-  // Walk every element and match by localName (case-insensitive). This catches
-  // XHTML `<SCRIPT>`, namespaced SVG active content, and HTML parsers alike —
-  // getElementsByTagName("script") can miss case variants in XML documents.
-  const toRemove: Element[] = [];
+/** Collect elements by case-insensitive localName (HTML + XHTML). */
+function collectByLocalName(doc: Document, names: Set<string>): Element[] {
+  const found: Element[] = [];
   const root = doc.documentElement;
-  if (!root) return;
-
+  if (!root) return found;
   const walk = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
   let node: Element | null = walk.currentNode as Element;
   while (node) {
     const local = (node.localName || node.tagName || "").toLowerCase();
-    if (REMOVE_LOCAL_NAMES.has(local) || SVG_REMOVE_LOCAL_NAMES.has(local)) {
-      toRemove.push(node);
-    }
+    if (names.has(local)) found.push(node);
     node = walk.nextNode() as Element | null;
   }
+  return found;
+}
 
+/**
+ * Chapter CSP forbids package scripts while allowing revealed blob images and
+ * inline styles. Injected as a meta tag in the chapter document head.
+ */
+function installChapterContentSecurityPolicy(doc: Document): void {
+  // Remove any author CSP first.
+  for (const meta of collectByLocalName(doc, new Set(["meta"]))) {
+    const httpEquiv = (meta.getAttribute("http-equiv") || "").toLowerCase();
+    if (httpEquiv === "content-security-policy") {
+      meta.remove();
+    }
+  }
+  const meta = doc.createElement("meta");
+  meta.setAttribute("http-equiv", "Content-Security-Policy");
+  meta.setAttribute(
+    "content",
+    [
+      "default-src 'none'",
+      "script-src 'none'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "img-src blob: data:",
+      "style-src 'unsafe-inline'",
+      "font-src data:",
+    ].join("; "),
+  );
+  const head =
+    doc.head ||
+    doc.getElementsByTagName("head")[0] ||
+    doc.documentElement;
+  if (head) {
+    head.insertBefore(meta, head.firstChild);
+  }
+}
+
+function stripHostileElements(doc: Document): void {
+  // Walk every element and match by localName (case-insensitive). This catches
+  // XHTML `<SCRIPT>`, namespaced SVG active content, and HTML parsers alike —
+  // getElementsByTagName("script") can miss case variants in XML documents.
+  const toRemove = collectByLocalName(
+    doc,
+    new Set([...REMOVE_LOCAL_NAMES, ...SVG_REMOVE_LOCAL_NAMES]),
+  );
   for (const el of toRemove) {
     el.remove();
   }
 }
 
+/** Neutralize network-fetching CSS constructs, including crude escapes. */
+function neutralizeCssText(css: string): string {
+  let next = css;
+  // Strip @import including CSS escapes like @\69 mport
+  next = next.replace(/@\\?i\\?m\\?p\\?o\\?r\\?t\b[^;]*;?/gi, "/* stripped import */");
+  next = next.replace(/@import\b[^;]*;?/gi, "/* stripped import */");
+  // url(http...), url(//...), url(/absolute), url(javascript:...)
+  next = next.replace(
+    /url\s*\(\s*(['"]?)\s*(?:https?:|\/\/|javascript:|\/(?!\/))[^)]*\)/gi,
+    "url(about:blank)",
+  );
+  return next;
+}
+
 /**
- * Neutralize CSS that can fetch remote resources: @import and url(http...).
+ * Neutralize CSS that can fetch remote resources: @import and url(...).
  * Full CSS parsing is out of scope; aggressive string neutralization is used.
  */
 function sanitizeInlineStyles(doc: Document): void {
-  for (const style of Array.from(doc.getElementsByTagName("style"))) {
+  for (const style of collectByLocalName(doc, new Set(["style"]))) {
     const text = style.textContent ?? "";
     if (!text) continue;
-    let next = text.replace(/@import\b[^;]+;?/gi, "/* stripped import */");
-    next = next.replace(
-      /url\s*\(\s*['"]?\s*(https?:|\/\/|javascript:)[^)]*\)/gi,
-      "url(about:blank)",
-    );
+    const next = neutralizeCssText(text);
     if (next !== text) {
       style.textContent = next;
     }
   }
 
-  for (const el of Array.from(doc.querySelectorAll("[style]"))) {
-    const style = el.getAttribute("style");
-    if (!style) continue;
-    if (
-      /@import/i.test(style) ||
-      /url\s*\(\s*['"]?\s*(https?:|\/\/|javascript:)/i.test(style)
-    ) {
-      el.setAttribute(
-        "style",
-        style
-          .replace(/@import\b[^;]+;?/gi, "")
-          .replace(
-            /url\s*\(\s*['"]?\s*(https?:|\/\/|javascript:)[^)]*\)/gi,
-            "url(about:blank)",
-          ),
-      );
+  const root = doc.documentElement;
+  if (!root) return;
+  const walk = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let node: Element | null = walk.currentNode as Element;
+  while (node) {
+    const style = node.getAttribute("style");
+    if (style) {
+      const next = neutralizeCssText(style);
+      if (next !== style) node.setAttribute("style", next);
     }
+    node = walk.nextNode() as Element | null;
   }
 }
 
 function stripMediaFetchAttributes(doc: Document): void {
-  // Any remaining media-like elements should not auto-fetch.
-  for (const el of Array.from(
-    doc.querySelectorAll("video, audio, source, track, embed, object"),
+  for (const el of collectByLocalName(
+    doc,
+    new Set(["video", "audio", "source", "track", "embed", "object"]),
   )) {
     el.removeAttribute("src");
     el.removeAttribute("srcset");
@@ -315,7 +361,7 @@ function stripMediaFetchAttributes(doc: Document): void {
  * URL but force new-tab + rel=noopener noreferrer, and mark for app chrome.
  */
 function secureExternalLinks(doc: Document): void {
-  for (const anchor of Array.from(doc.getElementsByTagName("a"))) {
+  for (const anchor of collectByLocalName(doc, new Set(["a"]))) {
     const href = anchor.getAttribute("href");
     if (!href) continue;
     const trimmed = href.trim();
@@ -330,7 +376,7 @@ function secureExternalLinks(doc: Document): void {
 }
 
 function stripMetaRefresh(doc: Document): void {
-  for (const meta of Array.from(doc.getElementsByTagName("meta"))) {
+  for (const meta of collectByLocalName(doc, new Set(["meta"]))) {
     const httpEquiv = meta.getAttribute("http-equiv");
     if (httpEquiv && httpEquiv.trim().toLowerCase() === "refresh") {
       meta.remove();
@@ -398,34 +444,39 @@ function neutralizeJavascriptUrls(doc: Document): void {
 }
 
 function stripRemoteStylesheets(doc: Document, resolve: ArchiveResolver): void {
-  for (const link of Array.from(doc.getElementsByTagName("link"))) {
+  for (const link of collectByLocalName(doc, new Set(["link"]))) {
     const rel = (link.getAttribute("rel") || "").toLowerCase();
-    if (!rel.split(/\s+/).includes("stylesheet")) continue;
-
     const href = link.getAttribute("href");
+    const isStylesheet = rel.split(/\s+/).includes("stylesheet");
+    // Non-stylesheet links (prefetch, icon, alternate, …) must not fetch either.
+    if (!isStylesheet) {
+      if (href && isRejectedOrNetworkHref(href)) {
+        link.remove();
+      } else if (href) {
+        // Drop networkable link types entirely for untrusted EPUB chrome.
+        link.remove();
+      }
+      continue;
+    }
+
     const safe = resolveArchiveCandidate(href, resolve);
     if (safe == null) {
-      // Remote / rejected / unresolvable stylesheet — remove the link entirely.
       link.remove();
     } else {
-      // Keep archive-local stylesheet; rewrite to the resolved form when provided.
       link.setAttribute("href", safe);
     }
   }
+}
 
-  // @import in inline style elements is rare in EPUBs; strip style tags that
-  // only exist to pull remote CSS via @import when the body is solely @import remote.
-  // Full CSS parsing is out of scope; neutralize style attributes with url(http...).
-  for (const el of Array.from(doc.querySelectorAll("[style]"))) {
-    const style = el.getAttribute("style");
-    if (!style) continue;
-    if (/url\s*\(\s*['"]?\s*(https?:|\/\/)/i.test(style)) {
-      el.setAttribute(
-        "style",
-        style.replace(/url\s*\(\s*['"]?\s*(https?:|\/\/)[^)]*\)/gi, "url(about:blank)"),
-      );
-    }
-  }
+function isRejectedOrNetworkHref(href: string): boolean {
+  const lower = href.trim().toLowerCase();
+  return (
+    lower.startsWith("http:") ||
+    lower.startsWith("https:") ||
+    lower.startsWith("//") ||
+    lower.startsWith("javascript:") ||
+    lower.startsWith("/")
+  );
 }
 
 function gateImages(
@@ -435,7 +486,8 @@ function gateImages(
   isDisposed: () => boolean,
   materialize?: MaterializeArchiveUrl,
 ): void {
-  for (const img of Array.from(doc.getElementsByTagName("img"))) {
+  for (const el of collectByLocalName(doc, new Set(["img"]))) {
+    const img = el as HTMLImageElement;
     const rawSrc = img.getAttribute("src");
     const rawSrcset = img.getAttribute("srcset");
 
@@ -592,12 +644,20 @@ async function revealHtmlImage(
   const storedSrcset = img.getAttribute("data-epub-srcset");
 
   if (storedSrc) {
-    let src = storedSrc;
-    if (!storedSrc.startsWith("blob:") && materialize) {
-      const materialized = await materialize(storedSrc);
-      if (materialized) {
-        src = materialized;
+    let src: string | null = storedSrc.startsWith("blob:") || storedSrc.startsWith("data:")
+      ? storedSrc
+      : null;
+    if (!src && materialize) {
+      src = await materialize(storedSrc);
+    }
+    // Fail closed: never assign an unverified relative/network path.
+    if (!src || (!src.startsWith("blob:") && !src.startsWith("data:"))) {
+      const button = findAssociatedGateButton(img);
+      if (button) {
+        button.textContent = "圖片載入失敗，點擊重試";
+        button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
       }
+      return;
     }
     img.setAttribute("src", src);
   }
@@ -657,13 +717,15 @@ async function revealSvgImage(
 ): Promise<void> {
   const stored = validateRestorableUrl(image.getAttribute("data-epub-src"));
   if (!stored) return;
-  let href = stored;
-  if (!stored.startsWith("blob:") && materialize) {
-    const materialized = await materialize(stored);
-    if (materialized) href = materialized;
+  let href: string | null =
+    stored.startsWith("blob:") || stored.startsWith("data:") ? stored : null;
+  if (!href && materialize) {
+    href = await materialize(stored);
+  }
+  if (!href || (!href.startsWith("blob:") && !href.startsWith("data:"))) {
+    return;
   }
   image.setAttribute("href", href);
-  // Some SVG consumers still read xlink:href.
   try {
     image.setAttributeNS(XLINK_NS, "href", href);
   } catch {

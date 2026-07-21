@@ -80,26 +80,32 @@ export async function expireShareInbox(
 ): Promise<number> {
   const db = await openDatabase();
   try {
-    // Collect expired ids first in a readonly transaction, then delete in a
-    // second write transaction. Awaiting getAll() then deleting on the same
-    // transaction is unreliable on WebKit (transaction may auto-close).
-    const readTx = db.transaction("shareInbox", "readonly");
-    const readDone = transactionDone(readTx);
-    const all = await requestToPromise(readTx.objectStore("shareInbox").getAll());
-    await readDone;
-
+    // Cursor walk collects only expired ids without getAll() of every EPUB buffer.
     const expiredIds: string[] = [];
-    for (const raw of all) {
-      const entry = raw as { id?: unknown; receivedAt?: unknown } | undefined;
-      if (
-        entry &&
-        typeof entry.id === "string" &&
-        typeof entry.receivedAt === "number" &&
-        now - entry.receivedAt > SHARE_INBOX_TTL_MS
-      ) {
-        expiredIds.push(entry.id);
-      }
-    }
+    await new Promise<void>((resolve, reject) => {
+      const readTx = db.transaction("shareInbox", "readonly");
+      const store = readTx.objectStore("shareInbox");
+      const cursorReq = store.openCursor();
+      cursorReq.onsuccess = () => {
+        const cursor = cursorReq.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const entry = cursor.value as { id?: unknown; receivedAt?: unknown };
+        if (
+          typeof entry.id === "string" &&
+          typeof entry.receivedAt === "number" &&
+          now - entry.receivedAt > SHARE_INBOX_TTL_MS
+        ) {
+          expiredIds.push(entry.id);
+        }
+        cursor.continue();
+      };
+      cursorReq.onerror = () => {
+        reject(cursorReq.error ?? new Error("shareInbox cursor failed"));
+      };
+    });
 
     if (expiredIds.length === 0) {
       return 0;

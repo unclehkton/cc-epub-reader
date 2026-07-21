@@ -143,8 +143,11 @@ export interface AdaptedBook {
 }
 
 export interface EpubFactoryOptions {
-  /** false = no archive-wide blob/base64 rewrites (preferred). */
-  replacements?: string | false;
+  /**
+   * EPUB.js 0.3.93 only disables archive rewrites with the literal `"none"`.
+   * Falsy values fall back to `blobUrl` for archived books.
+   */
+  replacements?: string;
   openAs?: string;
   encoding?: string;
   [key: string]: unknown;
@@ -174,9 +177,9 @@ export const DEFAULT_RENDITION_OPTIONS: RenditionCreateOptions = {
   flow: "paginated",
   spread: "none",
   manager: "default",
-  // Sandbox allows scripts so image-gate listeners work in WebKit iframes.
-  // Primary security control is pre-serialization transformChapter (hostile
-  // scripts/tags/CSS imports stripped). EPUB package scripts must not run.
+  // Sandbox includes allow-scripts so WebKit delivers events to parent-bound
+  // gate listeners. Package scripts are blocked by chapter CSP (script-src
+  // 'none') plus pre-serialization transformChapter stripping.
   allowScriptedContent: true,
 };
 
@@ -243,12 +246,13 @@ export async function loadEpubFactory(): Promise<EpubFactory> {
   const construct = resolveEpubConstructor(mod);
 
   return (source: ArrayBuffer | string, options?: EpubFactoryOptions) => {
-    // Do not use archive-wide blobUrl replacements — that eagerly materializes
-    // object URLs for every package resource. Resolve package paths lazily and
-    // create blob URLs only for explicitly revealed chapter assets.
+    // EPUB.js treats falsy replacements as missing and falls back to blobUrl.
+    // The only supported disable value is the string "none".
+    const replacements =
+      options?.replacements === undefined ? "none" : options.replacements;
     return construct(source, {
-      replacements: options?.replacements ?? false,
       ...options,
+      replacements,
     });
   };
 }
@@ -372,23 +376,32 @@ export async function materializeArchiveUrl(
     return null;
   }
 
-  const candidates = new Set<string>([path]);
+  const rawCandidates = new Set<string>([path]);
   if (typeof book.resolve === "function") {
     try {
       const resolved = book.resolve(path);
-      if (resolved) candidates.add(resolved);
+      if (resolved) rawCandidates.add(resolved);
     } catch {
       // ignore
     }
   }
   // Common package layouts.
   if (!path.includes("/")) {
-    candidates.add(`images/${path}`);
-    candidates.add(`OEBPS/images/${path}`);
+    rawCandidates.add(`images/${path}`);
+    rawCandidates.add(`OEBPS/images/${path}`);
   } else if (path.startsWith("images/")) {
-    candidates.add(`OEBPS/${path}`);
+    rawCandidates.add(`OEBPS/${path}`);
   } else if (!path.startsWith("OEBPS/")) {
-    candidates.add(`OEBPS/${path}`);
+    rawCandidates.add(`OEBPS/${path}`);
+  }
+
+  // epubjs Archive.getBlob does url.substr(1) — paths must be absolute-from-root
+  // with a leading slash (e.g. `/OEBPS/images/local.png`).
+  const candidates = new Set<string>();
+  for (const c of rawCandidates) {
+    const cleaned = c.replace(/^\/+/, "");
+    candidates.add(cleaned);
+    candidates.add(`/${cleaned}`);
   }
 
   const create =
@@ -409,6 +422,10 @@ export async function materializeArchiveUrl(
         ]);
         if (typeof url === "string" && url.trim()) {
           const out = url.trim();
+          // Fail closed: only accept verified blob/data object URLs.
+          if (!out.startsWith("blob:") && !out.startsWith("data:")) {
+            continue;
+          }
           if (ownedObjectUrls && out.startsWith("blob:")) {
             ownedObjectUrls.add(out);
           }
@@ -420,14 +437,23 @@ export async function materializeArchiveUrl(
     }
   }
 
-  // Last resort: first package-relative candidate (some engines resolve via base).
-  return path;
+  return null;
 }
 
-function trackIfBlob(url: string, owned?: Set<string>): void {
-  if (!owned) return;
-  if (url.startsWith("blob:")) {
-    // EPUB.js archive owns most blob URLs; we only track ones we create ourselves.
-    // Do not auto-track library-owned blobs (archive.destroy revokes them).
+/**
+ * Drop revoked blob URLs from EPUB.js archive.urlCache so a later createUrl
+ * does not return a dead reference after chapter teardown.
+ */
+export function purgeArchiveUrlCache(
+  book: AdaptedBook,
+  urls: Iterable<string>,
+): void {
+  const cache = book.archive?.urlCache;
+  if (!cache || typeof cache !== "object") return;
+  const doomed = new Set(urls);
+  for (const [key, value] of Object.entries(cache)) {
+    if (typeof value === "string" && doomed.has(value)) {
+      delete cache[key];
+    }
   }
 }

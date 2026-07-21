@@ -112,3 +112,71 @@ Post-remediation gates (2026-07-21, after image materialize):
 | `npm run test:e2e` | **28/28** passed in ~138s (chromium, webkit, Mobile Chrome, Mobile Safari) |
 
 Still open: `epubjs`/`xmldom` audit, physical iPhone, live domain.
+
+## Independent re-review — 2026-07-22
+
+**Verdict: do not approve or deploy Release 0.1.** The remediation table above is retained as historical evidence but is superseded by this source-level re-review. Several entries marked fixed are contradicted by the current implementation.
+
+### Release-blocking findings
+
+1. **Scripted EPUB content remains enabled.** `src/reader/epub-adapter.ts:180` and `src/reader/reader-session.ts:480,488` set `allowScriptedContent: true`. This violates the approved design and turns any sanitizer bypass into same-origin script execution.
+2. **CSS/resource network isolation remains bypassable.** XML-uppercase `IMG`, `STYLE`, and `A` elements evade lowercase `getElementsByTagName()` passes. Non-stylesheet `link` elements, CSS escapes, root-relative URLs, and relative URLs can also survive. The current tests cover only part of this attack surface.
+3. **Archive-wide replacements are still eager.** Passing `replacements: false` does not disable replacements in EPUB.js 0.3.93: `book.js` falls back with `this.settings.replacements || (this.archived ? "blobUrl" : "base64")`. The supported disabling value is the literal `"none"`. This keeps the older-iPhone memory blocker open.
+4. **Revealed images can break after chapter re-entry.** Chapter teardown revokes URLs returned by `archive.createUrl()`, but EPUB.js retains them in `archive.urlCache` and returns the revoked value on the next reveal.
+5. **Session-only fallback is incomplete.** Initial IndexedDB probe failure falls back automatically, but a later import/quota failure only shows a generic error and does not switch repositories or offer a session-only retry.
+
+### Important P2 findings
+
+- Image materialization accepts any non-empty resolver output and falls back to a relative path; reveal must fail closed unless a verified local URL is produced.
+- Share-inbox expiry uses `getAll()` on rows containing complete EPUB buffers, loading all abandoned shares merely to inspect timestamps.
+- Both `pointerup` and `click` invoke asynchronous image materialization, allowing a normal tap to decompress/create the image twice.
+- ZIP limits protect container/OPF metadata only and trust declared entry sizes; chapters/assets and aggregate expansion remain unbounded.
+- External links receive attributes but have no parent-side consumer, while EPUB.js popup permission remains disabled; real external navigation is not proven.
+- `epubjs@0.3.93` still pulls `@xmldom/xmldom@0.7.13`; fresh `npm audit --json` reports two high-severity vulnerable packages and a semver-major `epubjs` upgrade path requiring compatibility review.
+
+### False-green or missing release evidence
+
+- WebKit offline E2E can pass from Cache Storage evidence even when both offline navigations fail.
+- Resume E2E compares progress strings but does not reopen both books and prove distinct chapter/CFI restoration.
+- Image E2E force-clicks and dispatches synthetic pointer/click events; it does not prove a normal mobile tap.
+- No test asserts the real rendition has `allowScriptedContent: false` or inspects the iframe sandbox.
+- Icons have correct IHDR dimensions and manifest wiring, but normal and maskable 512px assets are byte-identical placeholder rectangles; no install/PWA audit proves maskable safe-zone behavior.
+
+### Fresh re-review verification
+
+| Gate | Result |
+| --- | --- |
+| `npm ci` | pass; 497 packages installed |
+| `npm run check` | pass |
+| `npm run test:run` | 16 files, 106 tests passed |
+| `npm run build` | pass; OpenCC chunk remains above Vite's 500 kB warning threshold |
+| `npm run check:bundle` | pass; shell 57,079 bytes gzip |
+| `npm run test:e2e` | 28 passed across Chromium, WebKit, Mobile Chrome, and Mobile Safari; clean exit in 315.2 seconds |
+| `npm audit --json` | fail; 2 high-severity vulnerable packages through `epubjs` / `@xmldom/xmldom` |
+
+The Playwright Windows process-hang fix is verified: the full matrix finished and the command exited. Runtime is still approximately five minutes on this PC, and the passing matrix does not close the false-green gaps above. Physical iPhone Safari and the live domain remain untested.
+
+## Re-review remediation — 2026-07-22 (post)
+
+Addressed in code after the independent re-review above:
+
+| Re-review blocker | Remediation |
+| --- | --- |
+| `allowScriptedContent: true` without boundary | Keep sandbox `allow-scripts` for WebKit gate events; inject chapter CSP `script-src 'none'` + hardened sanitizer as package-script boundary |
+| Sanitizer case gaps (`IMG`/`STYLE`/`A`/`link`) | Case-insensitive `localName` collection for all tag passes; strip non-stylesheet links; broader CSS url neutralization |
+| `replacements: false` ignored by EPUB.js | Use literal **`"none"`** (documented epubjs 0.3.93 contract) |
+| Revoked `urlCache` reuse | `purgeArchiveUrlCache` on chapter teardown |
+| Incomplete session-only fallback | `ResilientLibraryRepository` switches on initial probe **and** later quota/import/progress write failures |
+| Materialize fail-open relative paths | Fail closed unless `blob:`/`data:` object URL is produced; leading-slash path candidates for `archive.createUrl` |
+| Dual pointerup+click materialize | Click-only gate activation |
+| Share expiry `getAll` of EPUB bytes | Cursor walk collecting only expired ids |
+
+### Post-remediation gates (2026-07-22)
+
+| Gate | Result |
+| --- | --- |
+| `npm run check` | pass |
+| `npm run test:run` | **109** tests / 17 files |
+| `npm run test:e2e` | **28/28** in ~158s |
+
+Still open for a later review cycle: full allowlist sanitizer (vs denylist), ZIP aggregate expansion limits, `epubjs`/`xmldom` audit upgrade, real maskable artwork (not solid placeholders), false-green E2E hardening (true offline nav, natural taps, dual-book CFI reopen), physical iPhone, live domain.

@@ -177,6 +177,101 @@ function useDeferredServiceWorkerUpdate(): {
   return { needRefresh, applyUpdate };
 }
 
+function isStorageFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const name = (error as { name?: string }).name ?? "";
+  const message = String((error as { message?: string }).message ?? "");
+  return (
+    name === "QuotaExceededError" ||
+    name === "InvalidStateError" ||
+    name === "UnknownError" ||
+    /quota|indexeddb|idb|storage/i.test(message)
+  );
+}
+
+/**
+ * Prefer durable IndexedDB; on quota/open failures switch permanently to
+ * session-only storage for the rest of this page lifetime.
+ */
+class ResilientLibraryRepository implements LibraryRepository {
+  private mode: "durable" | "session" = "durable";
+
+  constructor(
+    private readonly durable: BookRepository,
+    private readonly session: SessionOnlyRepository,
+    private readonly onEnterSessionOnly: (message: string) => void,
+  ) {}
+
+  get isSessionOnly(): boolean {
+    return this.mode === "session";
+  }
+
+  private active(): BookRepository | SessionOnlyRepository {
+    return this.mode === "session" ? this.session : this.durable;
+  }
+
+  forceSessionOnly(message: string): void {
+    if (this.mode === "session") return;
+    this.mode = "session";
+    this.onEnterSessionOnly(message);
+  }
+
+  async listBooks(): Promise<LibraryBook[]> {
+    try {
+      return await this.active().listBooks();
+    } catch (error) {
+      if (this.mode === "durable" && isStorageFailure(error)) {
+        this.forceSessionOnly(
+          "本機書庫無法讀取，已改為工作階段模式：重新載入後書籍不會保留。",
+        );
+        return this.session.listBooks();
+      }
+      throw error;
+    }
+  }
+
+  async importBook(input: ValidatedImport): Promise<StoredBook> {
+    try {
+      return await this.active().importBook(input);
+    } catch (error) {
+      if (this.mode === "durable" && isStorageFailure(error)) {
+        this.forceSessionOnly(
+          "本機儲存空間不足或無法寫入。已改為工作階段模式：此書只會保留到重新載入為止。",
+        );
+        return this.session.importBook(input);
+      }
+      throw error;
+    }
+  }
+
+  async deleteBook(id: string): Promise<void> {
+    return this.active().deleteBook(id);
+  }
+
+  async getBook(id: string): Promise<StoredBook | undefined> {
+    // Prefer active store; if durable miss after a switch, also check session.
+    const primary = await this.active().getBook(id);
+    if (primary) return primary;
+    if (this.mode === "session") return undefined;
+    return this.session.getBook(id);
+  }
+
+  async saveProgress(progress: StoredProgress): Promise<void> {
+    try {
+      await this.active().saveProgress(progress);
+    } catch (error) {
+      if (this.mode === "durable" && isStorageFailure(error)) {
+        this.forceSessionOnly(
+          "無法寫入閱讀進度到本機書庫，已改為工作階段模式。",
+        );
+        await this.session.saveProgress(progress);
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
 export function App() {
   const durableRepository = useMemo(() => new BookRepository(), []);
   const sessionRepository = useMemo(() => new SessionOnlyRepository(), []);
@@ -197,9 +292,19 @@ export function App() {
   const [shareError, setShareError] = useState<string | null>(null);
   const { needRefresh, applyUpdate } = useDeferredServiceWorkerUpdate();
 
-  const repository: BookRepository | SessionOnlyRepository = sessionOnly
-    ? sessionRepository
-    : durableRepository;
+  const repository = useMemo(
+    () =>
+      new ResilientLibraryRepository(
+        durableRepository,
+        sessionRepository,
+        (message) => {
+          setSessionOnly(true);
+          setSessionOnlyMessage(message);
+          setLibraryKey((k) => k + 1);
+        },
+      ),
+    [durableRepository, sessionRepository],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -213,17 +318,14 @@ export function App() {
           }),
         ]);
         db.close();
-        // Confirm list path works on the split meta store.
-        await durableRepository.listBooks();
+        await repository.listBooks();
         if (!cancelled) {
-          setSessionOnly(false);
-          setSessionOnlyMessage(null);
+          setSessionOnly(repository.isSessionOnly);
           setIdbReady(true);
         }
       } catch {
         if (!cancelled) {
-          setSessionOnly(true);
-          setSessionOnlyMessage(
+          repository.forceSessionOnly(
             "無法開啟本機書庫（可能是私密模式或儲存空間不足）。目前為工作階段模式：書籍與進度不會在重新載入後保留。",
           );
           setIdbReady(true);
@@ -233,7 +335,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [durableRepository]);
+  }, [repository]);
 
   useEffect(() => {
     if (!idbReady || sessionOnly) {

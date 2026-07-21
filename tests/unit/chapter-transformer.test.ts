@@ -86,9 +86,11 @@ describe("transformChapter sanitizer", () => {
 <html xmlns="http://www.w3.org/1999/xhtml">
   <head><title>x</title>
     <style>@import url("https://evil.example/a.css"); p { background: url(https://evil.example/b.png); }</style>
+    <link rel="prefetch" href="https://evil.example/x"/>
   </head>
   <body>
     <SCRIPT type="text/javascript">window.pwned=1</SCRIPT>
+    <IMG src="https://evil.example/x.png" alt="x"/>
     <video src="https://evil.example/v.mp4"></video>
     <audio src="https://evil.example/a.mp3"></audio>
     <p style="background:url(https://evil.example/c.png)">ok</p>
@@ -102,6 +104,11 @@ describe("transformChapter sanitizer", () => {
     expect(doc.getElementsByTagName("SCRIPT").length).toBe(0);
     expect(doc.getElementsByTagName("video").length).toBe(0);
     expect(doc.getElementsByTagName("audio").length).toBe(0);
+    // Uppercase IMG must not keep a live network src.
+    for (const img of Array.from(doc.getElementsByTagName("img"))) {
+      expect(img.getAttribute("src")).toBeNull();
+    }
+    expect(doc.getElementsByTagName("link").length).toBe(0);
     const styleText = doc.getElementsByTagName("style")[0]?.textContent ?? "";
     expect(styleText.toLowerCase()).not.toContain("@import");
     expect(styleText.toLowerCase()).not.toContain("https://evil.example");
@@ -110,6 +117,12 @@ describe("transformChapter sanitizer", () => {
     const a = doc.getElementsByTagName("a")[0]!;
     expect(a.getAttribute("rel")).toContain("noopener");
     expect(a.getAttribute("target")).toBe("_blank");
+    const csp = Array.from(doc.getElementsByTagName("meta")).find(
+      (m) =>
+        (m.getAttribute("http-equiv") || "").toLowerCase() ===
+        "content-security-policy",
+    );
+    expect(csp?.getAttribute("content") || "").toContain("script-src 'none'");
   });
 
   it("strips inline event handlers and javascript: links", () => {
