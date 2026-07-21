@@ -355,4 +355,3 @@ Deployment credentials and DNS ownership are external prerequisites. Their absen
 - Approximate spine-based progress avoids the CPU and memory cost of generating whole-book locations.
 - Pre-render image source removal is more complex than CSS hiding but is required to guarantee lazy image loading.
 - iOS focus mode is an explicit platform fallback, not a claim that mobile Safari exposes arbitrary fullscreen.
-
