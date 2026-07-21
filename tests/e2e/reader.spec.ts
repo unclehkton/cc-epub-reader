@@ -61,6 +61,18 @@ test.describe("reader", () => {
     // each has been opened at a different spine/page.
     expect(firstProgressText).not.toEqual(secondProgressText);
 
+    // Re-open first book and prove chapter resume (not only progress string).
+    await openBook(page, "阅读夹具");
+    await expect(page.locator(".reader-chapter-title")).toContainText(/第二章|图片/, {
+      timeout: 30_000,
+    });
+    await closeReader(page);
+
+    // Re-open second book — distinct resume location from the first.
+    await openBook(page, "长章节压力夹具");
+    await expect(page.getByLabel(/閱讀：/)).toBeVisible();
+    await closeReader(page);
+
     // Re-open first book and exercise flow switch + conversion + image gate.
     await openBook(page, "阅读夹具");
 
@@ -151,5 +163,33 @@ test.describe("reader", () => {
     await expect(page.getByRole("radio", { name: "香港繁體" })).toBeVisible();
     await expect(page.getByRole("radio", { name: "分頁" })).toBeVisible();
     await expect(page.getByRole("radio", { name: "捲動" })).toBeVisible();
+  });
+
+  test("rendition keeps scripted content disabled", async ({ page }) => {
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_READER);
+    await waitForBookTitle(page, "阅读夹具");
+    await openBook(page, "阅读夹具");
+
+    // Parent overlay gates prove we do not rely on iframe script handlers.
+    await selectTocEntry(page, /第二章/);
+    await page.waitForTimeout(800);
+    const parentGate = page.locator("button.epub-parent-image-gate").first();
+    await expect(parentGate).toBeVisible({ timeout: 20_000 });
+
+    // Chapter documents must inject CSP that forbids scripts.
+    let sawCsp = false;
+    for (const frame of contentFrames(page)) {
+      try {
+        const content = await frame.locator('meta[http-equiv="Content-Security-Policy" i]').first().getAttribute("content", { timeout: 1000 });
+        if (content && content.includes("script-src") && content.includes("none")) {
+          sawCsp = true;
+          break;
+        }
+      } catch {
+        // frame may be navigating
+      }
+    }
+    expect(sawCsp).toBe(true);
   });
 });

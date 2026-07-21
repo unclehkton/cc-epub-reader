@@ -308,10 +308,30 @@ function neutralizeCssText(css: string): string {
   // Strip @import including CSS escapes like @\69 mport
   next = next.replace(/@\\?i\\?m\\?p\\?o\\?r\\?t\b[^;]*;?/gi, "/* stripped import */");
   next = next.replace(/@import\b[^;]*;?/gi, "/* stripped import */");
-  // url(http...), url(//...), url(/absolute), url(javascript:...)
+  // Blank every url(...) except data: / blob: so package/relative/network
+  // CSS fetches cannot load images outside the tap-to-reveal gate.
+  // Also strip common CSS escapes (e.g. u\rl(...), \75rl) that hide "url".
   next = next.replace(
-    /url\s*\(\s*(['"]?)\s*(?:https?:|\/\/|javascript:|\/(?!\/))[^)]*\)/gi,
-    "url(about:blank)",
+    /(?:u|\\75|\\0075)\s*(?:r|\\72|\\0072)\s*(?:l|\\6c|\\006c)\s*\(\s*([^)]*)\s*\)/gi,
+    (full, inner: string) => {
+      const value = String(inner)
+        .trim()
+        .replace(/^['"]|['"]$/g, "")
+        // Unescape simple hex escapes in the URL token for scheme checks.
+        .replace(/\\([0-9a-f]{1,6})\s?/gi, (_, hex: string) => {
+          try {
+            return String.fromCodePoint(Number.parseInt(hex, 16));
+          } catch {
+            return "";
+          }
+        })
+        .replace(/\\(.)/g, "$1");
+      const lower = value.toLowerCase();
+      if (lower.startsWith("data:") || lower.startsWith("blob:")) {
+        return full;
+      }
+      return "url(about:blank)";
+    },
   );
   return next;
 }

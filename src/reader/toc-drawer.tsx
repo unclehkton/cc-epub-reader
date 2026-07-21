@@ -84,6 +84,8 @@ export function TocDrawer({
                   aria-current={active ? "location" : undefined}
                   onClick={() => {
                     onSelect(entry.href);
+                    // Always request close after select; parent no-ops for side panel.
+                    onClose();
                   }}
                 >
                   {entry.label}

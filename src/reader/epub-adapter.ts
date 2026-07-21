@@ -177,10 +177,9 @@ export const DEFAULT_RENDITION_OPTIONS: RenditionCreateOptions = {
   flow: "paginated",
   spread: "none",
   manager: "default",
-  // Sandbox includes allow-scripts so WebKit delivers events to parent-bound
-  // gate listeners. Package scripts are blocked by chapter CSP (script-src
-  // 'none') plus pre-serialization transformChapter stripping.
-  allowScriptedContent: true,
+  // Never enable package script execution. Image-gate listeners are attached
+  // from the embedding app after render (not via EPUB package scripts).
+  allowScriptedContent: false,
 };
 
 /**
@@ -456,4 +455,65 @@ export function purgeArchiveUrlCache(
       delete cache[key];
     }
   }
+}
+
+/**
+ * EPUB.js 0.3.93 still *calls* Book.replacements() for every archived book
+ * even when settings.replacements is "none" (see book.js: archived || …).
+ * Resources.replacements() short-circuits on "none", but serialize hooks and
+ * any partial state can still linger. Force a clean no-replacement mode after
+ * open and revoke any eagerly created blob URLs.
+ */
+export function enforceNoArchiveReplacements(book: AdaptedBook): void {
+  const anyBook = book as AdaptedBook & {
+    settings?: { replacements?: string };
+    replacements?: () => Promise<unknown>;
+    resources?: {
+      settings?: { replacements?: string };
+      replacementUrls?: Array<string | null | undefined>;
+      urls?: string[];
+    };
+  };
+
+  if (anyBook.settings) {
+    anyBook.settings.replacements = "none";
+  }
+  if (anyBook.resources?.settings) {
+    anyBook.resources.settings.replacements = "none";
+  }
+
+  const revoke =
+    typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function"
+      ? (u: string) => URL.revokeObjectURL(u)
+      : () => undefined;
+
+  const replacements = anyBook.resources?.replacementUrls;
+  if (Array.isArray(replacements)) {
+    for (const url of replacements) {
+      if (typeof url === "string" && url.startsWith("blob:")) {
+        try {
+          revoke(url);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    anyBook.resources!.replacementUrls = [];
+  }
+
+  if (anyBook.archive?.urlCache) {
+    for (const [key, value] of Object.entries(anyBook.archive.urlCache)) {
+      if (typeof value === "string" && value.startsWith("blob:")) {
+        try {
+          revoke(value);
+        } catch {
+          // ignore
+        }
+        delete anyBook.archive.urlCache[key];
+      }
+    }
+  }
+
+  // Future calls must not rebuild the archive-wide blob map.
+  anyBook.replacements = () => Promise.resolve(anyBook);
 }

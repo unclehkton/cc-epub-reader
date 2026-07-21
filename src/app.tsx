@@ -178,14 +178,30 @@ function useDeferredServiceWorkerUpdate(): {
 }
 
 function isStorageFailure(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const name = (error as { name?: string }).name ?? "";
-  const message = String((error as { message?: string }).message ?? "");
+  if (error == null) return false;
+  // DOMException and plain objects both appear in browsers/tests.
+  const name =
+    typeof error === "object" && error !== null && "name" in error
+      ? String((error as { name?: unknown }).name ?? "")
+      : "";
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : String(error);
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? Number((error as { code?: unknown }).code)
+      : undefined;
+  // QuotaExceededError code is 22 in some engines; NS_ERROR_DOM_QUOTA_REACHED is 1014.
+  if (code === 22 || code === 1014) return true;
   return (
     name === "QuotaExceededError" ||
     name === "InvalidStateError" ||
     name === "UnknownError" ||
-    /quota|indexeddb|idb|storage/i.test(message)
+    name === "TransactionInactiveError" ||
+    /quota|indexeddb|idb|storage|disk|full/i.test(message)
   );
 }
 

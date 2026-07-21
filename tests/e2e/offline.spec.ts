@@ -67,29 +67,36 @@ test.describe("offline", () => {
       }
     }
 
-    if (navigatedOffline) {
-      await expect(page.getByRole("heading", { name: "你的書庫" })).toBeVisible({
-        timeout: 30_000,
-      });
-      await expect(
-        page.getByRole("button", { name: "開啟 阅读夹具" }),
-      ).toBeVisible();
-
-      // Opening the book should still work from IndexedDB + precached chunks.
-      await openBook(page, "阅读夹具");
-      await expect(page.getByLabel(/閱讀：/)).toBeVisible();
-    } else {
-      // Playwright WebKit on Windows can throw "WebKit encountered an internal
-      // error" for offline navigations even when SW precache is healthy.
-      // Chromium projects still exercise the full offline path above.
+    // Chromium (desktop + mobile) must complete real offline navigation.
+    // WebKit on Windows automation may throw internal errors; only then may
+    // the suite fall back to precache evidence — never for Chromium projects.
+    if (!navigatedOffline) {
       expect(
         browserName === "webkit",
-        "Offline navigation must work outside WebKit automation gaps",
+        "Offline navigation must succeed outside known WebKit automation gaps",
       ).toBe(true);
       expect(precacheEvidence.controlled || precacheEvidence.cacheCount > 0).toBe(
         true,
       );
+      test.info().annotations.push({
+        type: "note",
+        description:
+          "WebKit offline navigation failed in automation; passed on Cache Storage evidence only",
+      });
+      await context.setOffline(false);
+      return;
     }
+
+    await expect(page.getByRole("heading", { name: "你的書庫" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(
+      page.getByRole("button", { name: "開啟 阅读夹具" }),
+    ).toBeVisible();
+
+    // Opening the book should still work from IndexedDB + precached chunks.
+    await openBook(page, "阅读夹具");
+    await expect(page.getByLabel(/閱讀：/)).toBeVisible();
 
     await context.setOffline(false);
   });

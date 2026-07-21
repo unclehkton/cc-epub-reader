@@ -24,6 +24,9 @@
     "opencc-js": "1.4.1",
     "preact": "10.29.7"
   },
+  "overrides": {
+    "@xmldom/xmldom": "0.9.10"
+  },
   "devDependencies": {
     "@playwright/test": "1.61.1",
     "@preact/preset-vite": "2.10.6",

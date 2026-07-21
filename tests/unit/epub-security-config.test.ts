@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RENDITION_OPTIONS,
+  enforceNoArchiveReplacements,
   purgeArchiveUrlCache,
   type AdaptedBook,
 } from "../../src/reader/epub-adapter";
@@ -18,10 +19,10 @@ const sessionPath = path.resolve(
 );
 
 describe("EPUB security configuration", () => {
-  it("documents sandbox allow-scripts with chapter CSP as the script boundary", () => {
-    // allowScriptedContent true is required for WebKit image-gate events;
-    // package scripts are blocked by transformChapter CSP + sanitizer.
-    expect(DEFAULT_RENDITION_OPTIONS.allowScriptedContent).toBe(true);
+  it("disables scripted content on default rendition options", () => {
+    expect(DEFAULT_RENDITION_OPTIONS.allowScriptedContent).toBe(false);
+    const session = fs.readFileSync(sessionPath, "utf8");
+    expect(session).toMatch(/allowScriptedContent:\s*false/);
     const transformer = fs.readFileSync(
       path.resolve(
         path.dirname(fileURLToPath(import.meta.url)),
@@ -30,7 +31,6 @@ describe("EPUB security configuration", () => {
       "utf8",
     );
     expect(transformer).toMatch(/script-src 'none'/);
-    expect(transformer).toMatch(/installChapterContentSecurityPolicy/);
   });
 
   it("uses replacements none rather than a falsy false that EPUB.js ignores", () => {
@@ -39,6 +39,8 @@ describe("EPUB security configuration", () => {
     expect(adapter).toMatch(/replacements === undefined \? "none"/);
     expect(adapter).not.toMatch(/replacements:\s*false/);
     expect(session).toMatch(/replacements:\s*"none"/);
+    expect(adapter).toMatch(/enforceNoArchiveReplacements/);
+    expect(session).toMatch(/enforceNoArchiveReplacements/);
   });
 
   it("purges revoked blob URLs from the archive urlCache", () => {
@@ -52,5 +54,52 @@ describe("EPUB security configuration", () => {
     purgeArchiveUrlCache(book, ["blob:drop-me"]);
     expect(cache["OEBPS/images/a.png"]).toBe("blob:keep-me");
     expect(cache["OEBPS/images/b.png"]).toBeUndefined();
+  });
+
+  it("enforceNoArchiveReplacements clears eager blob maps and no-ops replacements()", async () => {
+    const revoked: string[] = [];
+    const original = URL.revokeObjectURL;
+    URL.revokeObjectURL = (u: string) => {
+      revoked.push(u);
+    };
+    try {
+      let replacementsCalled = 0;
+      const book = {
+        settings: { replacements: "blobUrl" },
+        resources: {
+          settings: { replacements: "blobUrl" },
+          replacementUrls: ["blob:eager-1", "blob:eager-2"],
+        },
+        archive: {
+          urlCache: { "/OEBPS/a.png": "blob:eager-1" },
+        },
+        replacements: async () => {
+          replacementsCalled += 1;
+          return book;
+        },
+      } as unknown as AdaptedBook;
+
+      enforceNoArchiveReplacements(book);
+
+      const anyBook = book as AdaptedBook & {
+        settings: { replacements: string };
+        resources: {
+          settings: { replacements: string };
+          replacementUrls: string[];
+        };
+        replacements: () => Promise<unknown>;
+      };
+      expect(anyBook.settings.replacements).toBe("none");
+      expect(anyBook.resources.settings.replacements).toBe("none");
+      expect(anyBook.resources.replacementUrls).toEqual([]);
+      expect(anyBook.archive?.urlCache?.["/OEBPS/a.png"]).toBeUndefined();
+      expect(revoked).toEqual(
+        expect.arrayContaining(["blob:eager-1", "blob:eager-2"]),
+      );
+      await anyBook.replacements();
+      expect(replacementsCalled).toBe(0);
+    } finally {
+      URL.revokeObjectURL = original;
+    }
   });
 });

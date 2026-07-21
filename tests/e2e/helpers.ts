@@ -61,7 +61,20 @@ export async function closeReader(page: Page): Promise<void> {
   });
 }
 
+/** Close the overlay TOC if it is covering the top bar (mobile). */
+export async function closeTocIfOpen(page: Page): Promise<void> {
+  const closeButtons = page.getByRole("button", { name: "關閉目錄" });
+  if ((await closeButtons.count()) === 0) {
+    return;
+  }
+  await closeButtons.first().click({ force: true });
+  await expect(page.getByRole("navigation", { name: "目錄" })).toBeHidden({
+    timeout: 10_000,
+  });
+}
+
 export async function openSettings(page: Page): Promise<void> {
+  await closeTocIfOpen(page);
   await page.getByRole("button", { name: "閱讀設定" }).click();
   await expect(page.getByRole("dialog", { name: "閱讀設定" })).toBeVisible();
 }
@@ -105,10 +118,17 @@ export async function selectTocEntry(
   label: string | RegExp,
 ): Promise<void> {
   await openToc(page);
-  await page
+  const entry = page
     .getByRole("navigation", { name: "目錄" })
-    .getByRole("button", { name: label })
-    .click();
+    .getByRole("button", { name: label });
+  await expect(entry).toBeVisible();
+  // DOM click is more reliable than force-click under fixed overlays on mobile.
+  await entry.evaluate((el) => {
+    (el as HTMLButtonElement).click();
+  });
+  // Overlay TOC can cover the top-bar settings control on mobile viewports.
+  // App code closes on select; always ensure chrome is reachable afterward.
+  await closeTocIfOpen(page);
 }
 
 /**
@@ -142,33 +162,35 @@ export async function findInContentFrames(
 }
 
 export async function clickImageGate(page: Page): Promise<void> {
+  await closeTocIfOpen(page);
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
+    // Prefer parent-document overlay gates (allowScriptedContent: false path).
+    // Real hit-test click first; force only as fallback for flaky layout.
+    const parentGates = page.locator(
+      "button.epub-parent-image-gate, body > button[aria-label='點擊顯示圖片']",
+    );
+    if ((await parentGates.count()) > 0) {
+      const gate = parentGates.first();
+      try {
+        await gate.click({ timeout: 2_000 });
+      } catch {
+        await gate.click({ force: true });
+      }
+      await page.waitForTimeout(600);
+      return;
+    }
+
     for (const frame of contentFrames(page)) {
       try {
         const gate = frame.getByRole("button", { name: "點擊顯示圖片" });
         if ((await gate.count()) > 0) {
-          // force: WebKit iframe hit-testing can be flaky with EPUB.js overlays.
-          await gate.first().click({ force: true });
-          // WebKit fallback: dispatch click + pointerup (listeners use both).
-          await frame.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll("button"));
-            const target = buttons.find(
-              (b) =>
-                (b.getAttribute("aria-label") || "").includes("點擊顯示圖片") ||
-                (b.textContent || "").includes("點擊顯示圖片"),
-            );
-            if (!target) return;
-            target.dispatchEvent(
-              new PointerEvent("pointerup", { bubbles: true, cancelable: true }),
-            );
-            target.dispatchEvent(
-              new MouseEvent("click", { bubbles: true, cancelable: true }),
-            );
-            target.click();
-          });
-          // Give async materializeArchiveUrl time to set img[src].
-          await page.waitForTimeout(500);
+          try {
+            await gate.first().click({ timeout: 2_000 });
+          } catch {
+            await gate.first().click({ force: true });
+          }
+          await page.waitForTimeout(600);
           return;
         }
       } catch {

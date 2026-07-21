@@ -158,25 +158,31 @@ The Playwright Windows process-hang fix is verified: the full matrix finished an
 
 ## Re-review remediation — 2026-07-22 (post)
 
-Addressed in code after the independent re-review above:
+Addressed in code after the independent re-review above (and the follow-up blocker pass):
 
 | Re-review blocker | Remediation |
 | --- | --- |
-| `allowScriptedContent: true` without boundary | Keep sandbox `allow-scripts` for WebKit gate events; inject chapter CSP `script-src 'none'` + hardened sanitizer as package-script boundary |
-| Sanitizer case gaps (`IMG`/`STYLE`/`A`/`link`) | Case-insensitive `localName` collection for all tag passes; strip non-stylesheet links; broader CSS url neutralization |
-| `replacements: false` ignored by EPUB.js | Use literal **`"none"`** (documented epubjs 0.3.93 contract) |
+| `allowScriptedContent: true` | **`false`** on default + session rendition; chapter CSP `script-src 'none'`; parent-document image-gate overlays (no iframe script dependency) |
+| Sanitizer case / CSS / link gaps | Case-insensitive `localName` walk; strip all non-safe `link` types; CSS `@import` + escaped `url()` neutralization; root-relative rejection |
+| `replacements: false` ignored by EPUB.js | Literal **`"none"`** + `enforceNoArchiveReplacements()` after open (clears eager blobs / no-ops `book.replacements`) |
 | Revoked `urlCache` reuse | `purgeArchiveUrlCache` on chapter teardown |
-| Incomplete session-only fallback | `ResilientLibraryRepository` switches on initial probe **and** later quota/import/progress write failures |
-| Materialize fail-open relative paths | Fail closed unless `blob:`/`data:` object URL is produced; leading-slash path candidates for `archive.createUrl` |
+| Incomplete session-only fallback | `ResilientLibraryRepository` switches on probe **and** later quota/import/progress write failures |
+| Materialize fail-open relative paths | Fail closed unless `blob:`/`data:` is produced; leading-slash `createUrl` candidates |
 | Dual pointerup+click materialize | Click-only gate activation |
 | Share expiry `getAll` of EPUB bytes | Cursor walk collecting only expired ids |
+| ZIP expansion unbounded beyond OPF | Per-entry + aggregate declared-size ceilings (`MAX_ENTRY_UNCOMPRESSED_BYTES` / `MAX_TOTAL_UNCOMPRESSED_BYTES`) |
+| `epubjs` / `@xmldom/xmldom` audit | `overrides["@xmldom/xmldom"] = "0.9.10"` → **`npm audit` 0 vulnerabilities** (still pinned to epubjs 0.3.93 API surface) |
+| False-green offline / resume / image | Chromium offline must complete real navigation; resume reopens books and asserts chapter title; image gate prefers real hit-test click; new CSP/scripted-content E2E |
+| Mobile TOC intercepts settings | TOC `onClose` after select + E2E helper always closes overlay before chrome actions |
 
-### Post-remediation gates (2026-07-22)
+### Post-remediation gates (2026-07-22, blocker pass)
 
 | Gate | Result |
 | --- | --- |
 | `npm run check` | pass |
-| `npm run test:run` | **109** tests / 17 files |
-| `npm run test:e2e` | **28/28** in ~158s |
+| `npm run test:run` | **112** tests / 17 files |
+| `npm run build` / `check:bundle` | pass (shell ~59 KiB gzip) |
+| `npm run test:e2e` | **32/32** across chromium, webkit, Mobile Chrome, Mobile Safari (~2.5 min) |
+| `npm audit` | **0** vulnerabilities |
 
-Still open for a later review cycle: full allowlist sanitizer (vs denylist), ZIP aggregate expansion limits, `epubjs`/`xmldom` audit upgrade, real maskable artwork (not solid placeholders), false-green E2E hardening (true offline nav, natural taps, dual-book CFI reopen), physical iPhone, live domain.
+Still open for a later review cycle: full allowlist sanitizer (vs denylist), epubjs 0.4 major upgrade / maintained fork decision, real maskable artwork (not solid placeholders), physical iPhone Safari, live `books.pkwor.com` canary.

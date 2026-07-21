@@ -5,6 +5,10 @@ import { ImportError } from "./import-errors";
 export const MAX_EPUB_BYTES = 100 * 1024 * 1024;
 /** Max uncompressed size for container.xml / package OPF text entries. */
 export const MAX_METADATA_ENTRY_BYTES = 2 * 1024 * 1024;
+/** Max declared uncompressed size for any single ZIP entry (chapters/assets). */
+export const MAX_ENTRY_UNCOMPRESSED_BYTES = 20 * 1024 * 1024;
+/** Max sum of declared uncompressed sizes across all ZIP entries. */
+export const MAX_TOTAL_UNCOMPRESSED_BYTES = 150 * 1024 * 1024;
 
 const ZIP_LOCAL_FILE_HEADER = [0x50, 0x4b, 0x03, 0x04] as const;
 const ACCEPTED_MIME = new Set([
@@ -15,6 +19,10 @@ const ACCEPTED_MIME = new Set([
 
 export interface ValidateEpubOptions {
   maxBytes?: number;
+  /** Override per-entry declared uncompressed ceiling (tests / constrained hosts). */
+  maxEntryUncompressedBytes?: number;
+  /** Override aggregate declared uncompressed ceiling. */
+  maxTotalUncompressedBytes?: number;
 }
 
 function hasEpubExtension(fileName: string): boolean {
@@ -37,22 +45,56 @@ async function hasZipMagic(file: Blob): Promise<boolean> {
 }
 
 /**
- * Reject ZIP entries whose declared uncompressed size exceeds the ceiling
- * before calling JSZip async decompression (ZIP bomb mitigation).
+ * Read a JSZip entry's declared uncompressed size when available.
+ * Missing sizes are treated as unknown (0 contribution) rather than trusted.
  */
-function assertEntrySize(entry: unknown, maxBytes: number): void {
+function declaredUncompressedSize(entry: unknown): number | undefined {
   const record = entry as {
     _data?: { uncompressedSize?: number };
     uncompressedSize?: number;
   };
-  const declared =
-    typeof record.uncompressedSize === "number"
-      ? record.uncompressedSize
-      : typeof record._data?.uncompressedSize === "number"
-        ? record._data.uncompressedSize
-        : undefined;
+  if (typeof record.uncompressedSize === "number") {
+    return record.uncompressedSize;
+  }
+  if (typeof record._data?.uncompressedSize === "number") {
+    return record._data.uncompressedSize;
+  }
+  return undefined;
+}
+
+/**
+ * Reject ZIP entries whose declared uncompressed size exceeds the ceiling
+ * before calling JSZip async decompression (ZIP bomb mitigation).
+ */
+function assertEntrySize(entry: unknown, maxBytes: number): void {
+  const declared = declaredUncompressedSize(entry);
   if (typeof declared === "number" && declared > maxBytes) {
     fail("too-large");
+  }
+}
+
+/**
+ * Reject archives whose declared per-entry or aggregate expansion exceeds limits.
+ * Declared sizes can be forged; this is a best-effort pre-decompress gate only.
+ */
+function assertZipExpansionLimits(
+  zip: JSZip,
+  maxEntryBytes: number,
+  maxTotalBytes: number,
+): void {
+  let total = 0;
+  for (const path of Object.keys(zip.files)) {
+    const entry = zip.files[path];
+    if (!entry || entry.dir) continue;
+    const declared = declaredUncompressedSize(entry);
+    if (typeof declared !== "number") continue;
+    if (declared > maxEntryBytes) {
+      fail("too-large");
+    }
+    total += declared;
+    if (total > maxTotalBytes) {
+      fail("too-large");
+    }
   }
 }
 
@@ -142,6 +184,10 @@ export async function validateEpub(
   }
 
   const maxBytes = options.maxBytes ?? MAX_EPUB_BYTES;
+  const maxEntryBytes =
+    options.maxEntryUncompressedBytes ?? MAX_ENTRY_UNCOMPRESSED_BYTES;
+  const maxTotalBytes =
+    options.maxTotalUncompressedBytes ?? MAX_TOTAL_UNCOMPRESSED_BYTES;
   if (file.size > maxBytes) {
     fail("too-large");
   }
@@ -171,6 +217,9 @@ export async function validateEpub(
   } catch {
     fail("invalid-zip");
   }
+
+  // Best-effort ZIP bomb guard from central-directory declared sizes.
+  assertZipExpansionLimits(zip, maxEntryBytes, maxTotalBytes);
 
   const encryption = zip.file("META-INF/encryption.xml");
   if (encryption) {

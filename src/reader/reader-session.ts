@@ -22,6 +22,7 @@ import {
   createArchiveResolver,
   DEFAULT_RENDITION_OPTIONS,
   loadEpubFactory,
+  enforceNoArchiveReplacements,
   materializeArchiveUrl,
   purgeArchiveUrlCache,
   type AdaptedBook,
@@ -132,6 +133,10 @@ class ReaderSessionImpl implements ReaderSession {
   private readonly ownedObjectUrls = new Set<string>();
   /** Blob URLs created for the active chapter's revealed images only. */
   private readonly chapterObjectUrls = new Set<string>();
+  /** Parent-document gate buttons (WebKit-safe without iframe allow-scripts). */
+  private readonly parentGateButtons: HTMLButtonElement[] = [];
+  private parentGateRepositionTimer: ReturnType<typeof setInterval> | null =
+    null;
   private readonly converter = new ChapterConverter();
   private transformResult: ChapterTransformResult | null = null;
   private spineContentHook: ((...args: unknown[]) => unknown) | null = null;
@@ -202,6 +207,8 @@ class ReaderSessionImpl implements ReaderSession {
       if (!this.isCurrent(gen)) {
         throw staleError();
       }
+      // epubjs may still enter replacements() for archived books; hard-disable.
+      enforceNoArchiveReplacements(book);
 
       this.spineCount = readSpineCount(book);
       this.rendition = this.createRendition(book);
@@ -410,12 +417,17 @@ class ReaderSessionImpl implements ReaderSession {
   private async afterChapterSettled(gen: number): Promise<void> {
     if (!this.isCurrent(gen)) return;
 
-    // WebKit may expose contents a tick after display() resolves.
-    let doc = readContentsDocument(this.rendition);
-    if (!doc) {
-      await waitMs(50);
+    // WebKit may expose contents a tick after display() resolves; poll briefly.
+    let doc: Document | null = null;
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      doc =
+        readContentsDocument(this.rendition) ||
+        readIframeDocument(this.element);
+      if (doc?.querySelector("button, img, body")) {
+        break;
+      }
+      await waitMs(40);
       if (!this.isCurrent(gen)) return;
-      doc = readContentsDocument(this.rendition);
     }
 
     if (doc) {
@@ -452,9 +464,115 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.transformResult = null;
     }
+    const materialize = this.makeMaterialize();
     this.transformResult = rebindImageGates(doc, {
-      materializeArchiveUrl: this.makeMaterialize(),
+      materializeArchiveUrl: materialize,
     });
+    // Sandbox without allow-scripts: in-iframe listeners are unreliable on
+    // WebKit. Parent-document overlay buttons receive real clicks safely.
+    this.installParentImageGates(doc, materialize);
+  }
+
+  private clearParentImageGates(): void {
+    if (this.parentGateRepositionTimer !== null) {
+      clearInterval(this.parentGateRepositionTimer);
+      this.parentGateRepositionTimer = null;
+    }
+    for (const button of this.parentGateButtons) {
+      try {
+        button.remove();
+      } catch {
+        // ignore
+      }
+    }
+    this.parentGateButtons.length = 0;
+  }
+
+  /**
+   * Place parent-document gate controls over gated images inside the iframe.
+   * Works with allowScriptedContent: false because handlers live outside the
+   * sandboxed chapter document.
+   */
+  private installParentImageGates(
+    doc: Document,
+    materialize?: (packagePath: string) => Promise<string | null>,
+  ): void {
+    this.clearParentImageGates();
+    if (typeof document === "undefined") return;
+    const iframe = this.element.querySelector("iframe");
+    if (!iframe || !materialize) return;
+
+    const pairs: Array<{ img: HTMLImageElement; inFrameButton: HTMLElement }> =
+      [];
+    for (const img of Array.from(
+      doc.querySelectorAll("img[data-epub-src]"),
+    ) as HTMLImageElement[]) {
+      const prev = img.previousElementSibling;
+      if (!prev || prev.tagName.toLowerCase() !== "button") continue;
+      const label = prev.getAttribute("aria-label") || "";
+      const text = prev.textContent?.trim() || "";
+      if (!label.includes("點擊顯示圖片") && !text.includes("點擊顯示圖片")) {
+        continue;
+      }
+      const inFrameButton = prev as HTMLElement;
+      pairs.push({ img, inFrameButton });
+      // Prefer parent control for activation; keep label for a11y in content.
+      inFrameButton.setAttribute("aria-hidden", "true");
+      inFrameButton.style.pointerEvents = "none";
+      inFrameButton.style.opacity = "0.35";
+    }
+
+    const reposition = (): void => {
+      for (let i = 0; i < this.parentGateButtons.length; i += 1) {
+        const button = this.parentGateButtons[i];
+        const pair = pairs[i];
+        if (!button || !pair) continue;
+        try {
+          const rect = pair.img.getBoundingClientRect();
+          button.style.left = `${Math.max(0, rect.left)}px`;
+          button.style.top = `${Math.max(0, rect.top - 48)}px`;
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    for (const pair of pairs) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "點擊顯示圖片";
+      button.setAttribute("aria-label", "點擊顯示圖片");
+      button.className = "epub-parent-image-gate touch-target";
+      button.style.position = "fixed";
+      // Stay below app chrome/TOC drawers (typically z-index 100+).
+      button.style.zIndex = "20";
+      button.style.minWidth = "44px";
+      button.style.minHeight = "44px";
+      button.style.pointerEvents = "auto";
+      button.style.maxWidth = "12rem";
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void (async () => {
+          const path = pair.img.getAttribute("data-epub-src");
+          if (!path) return;
+          const url = await materialize(path);
+          if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
+            button.textContent = "圖片載入失敗，點擊重試";
+            return;
+          }
+          pair.img.setAttribute("src", url);
+          pair.inFrameButton.hidden = true;
+          button.remove();
+          const idx = this.parentGateButtons.indexOf(button);
+          if (idx >= 0) this.parentGateButtons.splice(idx, 1);
+        })();
+      });
+      document.body.appendChild(button);
+      this.parentGateButtons.push(button);
+    }
+    reposition();
+    this.parentGateRepositionTimer = setInterval(reposition, 400);
   }
 
   private makeMaterialize():
@@ -478,15 +596,14 @@ class ReaderSessionImpl implements ReaderSession {
       ...DEFAULT_RENDITION_OPTIONS,
       flow: this.flow === "scrolled" ? "scrolled-doc" : "paginated",
       spread: "none",
-      allowScriptedContent: true,
+      allowScriptedContent: false,
       width: "100%",
       height: "100%",
     };
 
     const rendition = book.renderTo(this.element, options);
     if (rendition.settings) {
-      // See DEFAULT_RENDITION_OPTIONS — chapter CSP + sanitizer block package scripts.
-      rendition.settings.allowScriptedContent = true;
+      rendition.settings.allowScriptedContent = false;
     }
     return rendition;
   }
@@ -574,6 +691,7 @@ class ReaderSessionImpl implements ReaderSession {
 
   private teardownChapter(): void {
     this.converter.destroy();
+    this.clearParentImageGates();
     if (this.transformResult) {
       try {
         this.transformResult.dispose();
@@ -870,6 +988,16 @@ function readContentsDocument(
     return null;
   }
   return null;
+}
+
+function readIframeDocument(host: HTMLElement | null): Document | null {
+  if (!host) return null;
+  try {
+    const iframe = host.querySelector("iframe");
+    return iframe?.contentDocument ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function resolveTheme(

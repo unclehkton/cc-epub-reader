@@ -38,6 +38,37 @@ describe("validateEpub", () => {
     ).rejects.toMatchObject({ code: "too-large" });
   });
 
+  it("rejects archives whose declared entry expansion exceeds the per-entry ceiling", async () => {
+    const payload = "x".repeat(4096);
+    const bomb = await makeEpub({
+      title: "Bomb entry",
+      extraFiles: {
+        "OEBPS/huge.bin": payload,
+      },
+    });
+    await expect(
+      validateEpub(bomb, "bomb.epub", {
+        maxEntryUncompressedBytes: 1024,
+      }),
+    ).rejects.toMatchObject({ code: "too-large" });
+  });
+
+  it("rejects archives whose aggregate declared expansion exceeds the total ceiling", async () => {
+    const bomb = await makeEpub({
+      title: "Aggregate bomb",
+      extraFiles: {
+        "OEBPS/a.bin": "a".repeat(800),
+        "OEBPS/b.bin": "b".repeat(800),
+      },
+    });
+    await expect(
+      validateEpub(bomb, "agg.epub", {
+        maxEntryUncompressedBytes: 10_000,
+        maxTotalUncompressedBytes: 500,
+      }),
+    ).rejects.toMatchObject({ code: "too-large" });
+  });
+
   it("rejects wrong type when neither extension nor MIME is EPUB", async () => {
     const blob = new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], {
       type: "application/octet-stream",
