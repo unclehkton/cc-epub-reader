@@ -288,3 +288,470 @@ button {
   background: var(--danger);
   color: #fff;
 }
+
+/* ---------------------------------------------------------------------------
+   Reader — Ink & Jade (day) / Night Library (night)
+   Control positions stay stable across themes.
+--------------------------------------------------------------------------- */
+
+.reader-screen {
+  --reader-ink: #18342d;
+  --reader-jade: #205f50;
+  --reader-jade-deep: #16463b;
+  --reader-surface: #f7f5ed;
+  --reader-chrome: #f4f7f5;
+  --reader-muted: #5c6b66;
+  --reader-amber: #c9842d;
+  --reader-border: #d9d4c4;
+  --reader-danger: #a33b2c;
+  --reader-shadow: rgba(24, 52, 45, 0.14);
+
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--reader-surface);
+  color: var(--reader-ink);
+  z-index: 10;
+}
+
+.reader-screen--night {
+  --reader-ink: #d8e0dc;
+  --reader-jade: #3d7a6a;
+  --reader-jade-deep: #9bb8ae;
+  --reader-surface: #0f1a17;
+  --reader-chrome: #152420;
+  --reader-muted: #9aaba4;
+  --reader-amber: #d4a14a;
+  --reader-border: #243833;
+  --reader-danger: #e08a7a;
+  --reader-shadow: rgba(0, 0, 0, 0.4);
+}
+
+.reader-screen--bg-white {
+  --reader-surface: #ffffff;
+}
+
+.reader-screen--bg-sepia {
+  --reader-surface: #f4ecd8;
+}
+
+.reader-screen--night.reader-screen--bg-white,
+.reader-screen--night.reader-screen--bg-sepia,
+.reader-screen--night.reader-screen--bg-rice {
+  --reader-surface: #0f1a17;
+}
+
+.reader-topbar,
+.reader-bottombar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--reader-chrome);
+  border-color: var(--reader-border);
+  color: var(--reader-ink);
+  z-index: 3;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.reader-topbar {
+  padding: calc(0.35rem + env(safe-area-inset-top, 0px))
+    calc(0.4rem + env(safe-area-inset-right, 0px)) 0.35rem
+    calc(0.4rem + env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--reader-border);
+}
+
+.reader-bottombar {
+  justify-content: space-between;
+  padding: 0.35rem calc(0.5rem + env(safe-area-inset-right, 0px))
+    calc(0.45rem + env(safe-area-inset-bottom, 0px))
+    calc(0.5rem + env(safe-area-inset-left, 0px));
+  border-top: 1px solid var(--reader-border);
+}
+
+.reader-chrome--hidden,
+.reader-screen--chrome-hidden .reader-topbar,
+.reader-screen--chrome-hidden .reader-bottombar {
+  opacity: 0;
+  pointer-events: none;
+  /* Keep layout slots so reflow is stable; edges remain interactive. */
+}
+
+.reader-screen--focus .reader-topbar,
+.reader-screen--focus .reader-bottombar {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Focus mode still exposes the exit control for accessibility. */
+.reader-screen--focus .reader-topbar {
+  opacity: 1;
+  pointer-events: auto;
+  background: transparent;
+  border-bottom-color: transparent;
+}
+
+.reader-screen--focus .reader-topbar .reader-title-block,
+.reader-screen--focus .reader-topbar .reader-icon-btn:not([aria-label="結束全螢幕"]) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reader-title-block {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  padding: 0 0.25rem;
+}
+
+.reader-book-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--reader-jade-deep);
+}
+
+.reader-chapter-title {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--reader-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-icon-btn,
+.reader-nav-btn {
+  border: none;
+  background: transparent;
+  color: var(--reader-jade-deep);
+  font-weight: 600;
+  border-radius: 0.55rem;
+  padding: 0.35rem 0.55rem;
+  cursor: pointer;
+}
+
+.reader-icon-btn:focus-visible,
+.reader-nav-btn:focus-visible,
+.reader-edge:focus-visible,
+.settings-chip:focus-visible,
+.toc-item:focus-visible,
+.toc-close:focus-visible,
+.settings-close:focus-visible {
+  outline: 2px solid var(--reader-amber);
+  outline-offset: 2px;
+}
+
+.reader-progress {
+  margin: 0;
+  min-width: 3.5rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--reader-muted);
+  font-weight: 600;
+}
+
+.reader-body {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.reader-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+}
+
+.reader-host {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--reader-surface);
+  /* EPUB.js mounts iframe children here */
+}
+
+.reader-host > * {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.reader-edge {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  z-index: 2;
+  /* Always interactive — reading actions never depend on visible chrome. */
+  opacity: 0;
+}
+
+.reader-edge:focus-visible {
+  opacity: 0.15;
+  background: var(--reader-jade);
+}
+
+.reader-loading {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  padding: 0.5rem 0.85rem;
+  border-radius: 999px;
+  background: var(--reader-chrome);
+  border: 1px solid var(--reader-border);
+  color: var(--reader-muted);
+  z-index: 4;
+  pointer-events: none;
+}
+
+.reader-error-banner {
+  position: absolute;
+  left: 50%;
+  bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: min(92vw, 28rem);
+  padding: 0.65rem 0.9rem;
+  border-radius: 0.55rem;
+  background: #f8e8e5;
+  color: var(--reader-danger);
+  border: 1px solid #e8c4bc;
+  z-index: 5;
+}
+
+.reader-screen--night .reader-error-banner {
+  background: #3a221e;
+  border-color: #6a3a32;
+}
+
+.reader-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* TOC drawer / side panel */
+.toc-backdrop,
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  border: none;
+  padding: 0;
+  background: rgba(16, 28, 24, 0.45);
+  z-index: 20;
+  cursor: pointer;
+}
+
+.toc-drawer {
+  background: var(--reader-chrome);
+  color: var(--reader-ink);
+  border-color: var(--reader-border);
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.toc-drawer--overlay {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(20rem, 88vw);
+  box-shadow: 8px 0 28px var(--reader-shadow);
+  border-right: 1px solid var(--reader-border);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  transform: translateX(0);
+}
+
+.toc-drawer--side {
+  position: relative;
+  width: 16rem;
+  flex: 0 0 16rem;
+  border-right: 1px solid var(--reader-border);
+  z-index: 2;
+}
+
+.toc-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--reader-border);
+}
+
+.toc-drawer-title {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--reader-jade-deep);
+}
+
+.toc-close,
+.settings-close {
+  border: none;
+  background: transparent;
+  color: var(--reader-jade-deep);
+  font-weight: 600;
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+.toc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem;
+  overflow: auto;
+  flex: 1;
+}
+
+.toc-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.toc-item--active {
+  background: rgba(201, 132, 45, 0.16);
+  color: var(--reader-amber);
+  font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--reader-amber);
+}
+
+/* Settings sheet */
+.settings-sheet-root {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.settings-sheet {
+  position: relative;
+  z-index: 31;
+  width: min(100%, 28rem);
+  max-height: min(88vh, 40rem);
+  overflow: auto;
+  background: var(--reader-chrome);
+  color: var(--reader-ink);
+  border-radius: 1rem 1rem 0 0;
+  border: 1px solid var(--reader-border);
+  border-bottom: none;
+  box-shadow: 0 -12px 36px var(--reader-shadow);
+  padding: 0.85rem 0.95rem calc(1rem + env(safe-area-inset-bottom, 0px));
+}
+
+.settings-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.settings-sheet-title {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--reader-jade-deep);
+}
+
+.settings-section {
+  margin: 0.75rem 0 0;
+  padding: 0;
+  border: none;
+}
+
+.settings-section-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--reader-muted);
+  letter-spacing: 0.02em;
+}
+
+.settings-row,
+.settings-options {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.settings-options--wrap {
+  flex-wrap: wrap;
+}
+
+.settings-value {
+  min-width: 3.25rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.settings-chip {
+  border: 1px solid var(--reader-border);
+  background: var(--reader-surface);
+  color: var(--reader-ink);
+  border-radius: 999px;
+  padding: 0.45rem 0.8rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.settings-chip--active,
+.settings-chip[aria-checked="true"] {
+  border-color: var(--reader-amber);
+  background: rgba(201, 132, 45, 0.14);
+  color: var(--reader-amber);
+  box-shadow: inset 0 0 0 1px var(--reader-amber);
+}
+
+.settings-error {
+  margin: 0.5rem 0 0;
+  color: var(--reader-danger);
+  font-size: 0.9rem;
+}
+
+@media (min-width: 900px) {
+  .reader-screen--side-toc .reader-body {
+    display: flex;
+  }
+
+  .settings-sheet {
+    border-radius: 1rem;
+    border-bottom: 1px solid var(--reader-border);
+    margin-bottom: 1.5rem;
+  }
+
+  .settings-sheet-root {
+    align-items: center;
+  }
+}
+
