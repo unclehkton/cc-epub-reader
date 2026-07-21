@@ -104,12 +104,39 @@ export async function expireShareInbox(
   }
 }
 
+function epubFieldToBlob(value: unknown): Blob | undefined {
+  if (typeof Blob !== "undefined" && value instanceof Blob) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Blob([value], { type: "application/epub+zip" });
+  }
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    const copy = new ArrayBuffer(view.byteLength);
+    new Uint8Array(copy).set(
+      new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+    );
+    return new Blob([copy], { type: "application/epub+zip" });
+  }
+  return undefined;
+}
+
 export async function stageShareInbox(entry: ShareInboxEntry): Promise<void> {
+  // WebKit cannot structured-clone Blob/File into IndexedDB; store ArrayBuffer.
+  const epubBytes = await entry.epub.arrayBuffer();
+  const persisted = {
+    id: entry.id,
+    fileName: entry.fileName,
+    byteLength: epubBytes.byteLength,
+    epub: epubBytes,
+    receivedAt: entry.receivedAt,
+  };
   const db = await openDatabase();
   try {
     const tx = db.transaction("shareInbox", "readwrite");
     const done = transactionDone(tx);
-    const put = requestToPromise(tx.objectStore("shareInbox").put(entry));
+    const put = requestToPromise(tx.objectStore("shareInbox").put(persisted));
     await Promise.all([put, done]);
   } finally {
     db.close();
@@ -128,17 +155,24 @@ export async function getShareInboxEntry(
     if (!value || typeof value !== "object") {
       return undefined;
     }
-    const record = value as ShareInboxEntry;
+    const record = value as Record<string, unknown>;
+    const epub = epubFieldToBlob(record.epub);
     if (
       typeof record.id !== "string" ||
       typeof record.fileName !== "string" ||
       typeof record.byteLength !== "number" ||
       typeof record.receivedAt !== "number" ||
-      !(record.epub instanceof Blob)
+      !epub
     ) {
       return undefined;
     }
-    return record;
+    return {
+      id: record.id,
+      fileName: record.fileName,
+      byteLength: record.byteLength,
+      epub,
+      receivedAt: record.receivedAt,
+    };
   } finally {
     db.close();
   }

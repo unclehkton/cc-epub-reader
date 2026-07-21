@@ -11,7 +11,9 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:e2e": "playwright test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "fixtures": "node scripts/generate-fixtures.mjs"
   },
   "dependencies": {
     "epubjs": "0.3.93",

@@ -22,26 +22,72 @@ function createId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function isBlobLike(value: unknown): value is Blob {
+const EPUB_MIME = "application/epub+zip";
+
+/**
+ * Persist EPUB bytes as ArrayBuffer. WebKit/Playwright cannot structured-clone
+ * Blob/File into IndexedDB ("Error preparing Blob/File data…"), while
+ * ArrayBuffer stores and restores reliably across Chromium and WebKit.
+ */
+async function toStorableEpubBytes(source: Blob): Promise<ArrayBuffer> {
+  return source.arrayBuffer();
+}
+
+function epubBytesToBlob(value: unknown): Blob | undefined {
   if (typeof Blob !== "undefined" && value instanceof Blob) {
-    return true;
+    return value;
   }
-  // Defensive duck-type for structured-clone edge cases.
-  if (value === null || typeof value !== "object") {
-    return false;
+  if (value instanceof ArrayBuffer) {
+    return new Blob([value], { type: EPUB_MIME });
   }
-  const candidate = value as {
-    size?: unknown;
-    type?: unknown;
-    arrayBuffer?: unknown;
-    slice?: unknown;
-  };
-  return (
-    typeof candidate.size === "number" &&
-    typeof candidate.type === "string" &&
-    typeof candidate.arrayBuffer === "function" &&
-    typeof candidate.slice === "function"
-  );
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    const base = view.buffer;
+    const start = view.byteOffset;
+    const end = view.byteOffset + view.byteLength;
+    // Copy into a plain ArrayBuffer so BlobPart typing stays narrow.
+    const copy = new ArrayBuffer(view.byteLength);
+    new Uint8Array(copy).set(new Uint8Array(base, start, view.byteLength));
+    return new Blob([copy], { type: EPUB_MIME });
+  }
+  // Defensive duck-type for structured-clone edge cases that still look like Blob.
+  if (value !== null && typeof value === "object") {
+    const candidate = value as {
+      size?: unknown;
+      type?: unknown;
+      arrayBuffer?: unknown;
+      slice?: unknown;
+    };
+    if (
+      typeof candidate.size === "number" &&
+      typeof candidate.type === "string" &&
+      typeof candidate.arrayBuffer === "function" &&
+      typeof candidate.slice === "function"
+    ) {
+      return candidate as Blob;
+    }
+  }
+  return undefined;
+}
+
+/** Record shape written to the books object store (epub as ArrayBuffer). */
+interface PersistedBookRecord {
+  id: string;
+  fileName: string;
+  byteLength: number;
+  epub: ArrayBuffer;
+  title: string;
+  creator?: string;
+  savedAt: number;
+  lastOpenedAt?: number;
+}
+
+interface PersistedShareRecord {
+  id: string;
+  fileName: string;
+  byteLength: number;
+  epub: ArrayBuffer;
+  receivedAt: number;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -58,12 +104,13 @@ function parseStoredBook(value: unknown): StoredBook | undefined {
   }
 
   const record = value as Record<string, unknown>;
+  const epub = epubBytesToBlob(record.epub);
 
   if (
     !isNonEmptyString(record.id) ||
     !isNonEmptyString(record.fileName) ||
     !isFiniteNumber(record.byteLength) ||
-    !isBlobLike(record.epub) ||
+    !epub ||
     !isNonEmptyString(record.title) ||
     !isFiniteNumber(record.savedAt)
   ) {
@@ -85,7 +132,7 @@ function parseStoredBook(value: unknown): StoredBook | undefined {
     id: record.id,
     fileName: record.fileName,
     byteLength: record.byteLength,
-    epub: record.epub,
+    epub,
     title: record.title,
     savedAt: record.savedAt,
   };
@@ -144,12 +191,13 @@ function parseShareInboxEntry(value: unknown): ShareInboxEntry | undefined {
   }
 
   const record = value as Record<string, unknown>;
+  const epub = epubBytesToBlob(record.epub);
 
   if (
     !isNonEmptyString(record.id) ||
     !isNonEmptyString(record.fileName) ||
     !isFiniteNumber(record.byteLength) ||
-    !isBlobLike(record.epub) ||
+    !epub ||
     !isFiniteNumber(record.receivedAt)
   ) {
     return undefined;
@@ -159,7 +207,7 @@ function parseShareInboxEntry(value: unknown): ShareInboxEntry | undefined {
     id: record.id,
     fileName: record.fileName,
     byteLength: record.byteLength,
-    epub: record.epub,
+    epub,
     receivedAt: record.receivedAt,
   };
 }
@@ -184,11 +232,13 @@ export class BookRepository {
   }
 
   async importBook(input: ValidatedImport): Promise<StoredBook> {
+    const epubBytes = await toStorableEpubBytes(input.epub);
+    const epub = new Blob([epubBytes], { type: EPUB_MIME });
     const book: StoredBook = {
       id: createId(),
       fileName: input.fileName,
-      byteLength: input.epub.size,
-      epub: input.epub,
+      byteLength: epub.size,
+      epub,
       title: input.title,
       savedAt: Date.now(),
     };
@@ -196,10 +246,22 @@ export class BookRepository {
       book.creator = input.creator;
     }
 
+    const persisted: PersistedBookRecord = {
+      id: book.id,
+      fileName: book.fileName,
+      byteLength: book.byteLength,
+      epub: epubBytes,
+      title: book.title,
+      savedAt: book.savedAt,
+    };
+    if (book.creator !== undefined) {
+      persisted.creator = book.creator;
+    }
+
     await this.withDb(async (db) => {
       const tx = db.transaction("books", "readwrite");
       const done = transactionDone(tx);
-      const put = requestToPromise(tx.objectStore("books").put(book));
+      const put = requestToPromise(tx.objectStore("books").put(persisted));
       await Promise.all([put, done]);
     });
 
@@ -278,9 +340,23 @@ export class BookRepository {
 
       book.lastOpenedAt = Date.now();
 
+      const epubBytes = await toStorableEpubBytes(book.epub);
+      const persisted: PersistedBookRecord = {
+        id: book.id,
+        fileName: book.fileName,
+        byteLength: book.byteLength,
+        epub: epubBytes,
+        title: book.title,
+        savedAt: book.savedAt,
+        lastOpenedAt: book.lastOpenedAt,
+      };
+      if (book.creator !== undefined) {
+        persisted.creator = book.creator;
+      }
+
       const writeTx = db.transaction("books", "readwrite");
       const writeDone = transactionDone(writeTx);
-      const put = requestToPromise(writeTx.objectStore("books").put(book));
+      const put = requestToPromise(writeTx.objectStore("books").put(persisted));
       await Promise.all([put, writeDone]);
       return book;
     });
@@ -309,10 +385,18 @@ export class BookRepository {
   }
 
   async stageShare(entry: ShareInboxEntry): Promise<void> {
+    const epubBytes = await toStorableEpubBytes(entry.epub);
+    const staged: PersistedShareRecord = {
+      id: entry.id,
+      fileName: entry.fileName,
+      byteLength: epubBytes.byteLength,
+      epub: epubBytes,
+      receivedAt: entry.receivedAt,
+    };
     await this.withDb(async (db) => {
       const tx = db.transaction("shareInbox", "readwrite");
       const done = transactionDone(tx);
-      const put = requestToPromise(tx.objectStore("shareInbox").put(entry));
+      const put = requestToPromise(tx.objectStore("shareInbox").put(staged));
       await Promise.all([put, done]);
     });
   }
@@ -321,16 +405,30 @@ export class BookRepository {
     id: string,
     validated: ValidatedImport,
   ): Promise<StoredBook> {
+    const epubBytes = await toStorableEpubBytes(validated.epub);
+    const epub = new Blob([epubBytes], { type: EPUB_MIME });
     const book: StoredBook = {
       id: createId(),
       fileName: validated.fileName,
-      byteLength: validated.epub.size,
-      epub: validated.epub,
+      byteLength: epub.size,
+      epub,
       title: validated.title,
       savedAt: Date.now(),
     };
     if (validated.creator !== undefined) {
       book.creator = validated.creator;
+    }
+
+    const persisted: PersistedBookRecord = {
+      id: book.id,
+      fileName: book.fileName,
+      byteLength: book.byteLength,
+      epub: epubBytes,
+      title: book.title,
+      savedAt: book.savedAt,
+    };
+    if (book.creator !== undefined) {
+      persisted.creator = book.creator;
     }
 
     await this.withDb(async (db) => {
@@ -378,7 +476,7 @@ export class BookRepository {
           }
 
           // Same readwrite transaction: add book, delete only matching inbox id.
-          booksStore.put(book);
+          booksStore.put(persisted);
           inboxStore.delete(id);
         };
         getReq.onerror = () => {

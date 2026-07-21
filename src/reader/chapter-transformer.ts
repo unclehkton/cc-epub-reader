@@ -61,10 +61,140 @@ export function transformChapter(
   gateSvgImages(document, resolveArchiveUrl, disposers, () => disposed);
   stripPictureSources(document);
 
+  return makeDisposable(disposers, () => disposed, (value) => {
+    disposed = value;
+  });
+}
+
+/**
+ * Re-attach image gate listeners on the *live* chapter document after EPUB.js
+ * serializes the pre-hook document into the rendition iframe (listeners do not
+ * survive serialization). Security-critical src stripping still happens only in
+ * {@link transformChapter}.
+ *
+ * Also installs a document-level delegated click handler so WebKit still reveals
+ * images when per-button listeners are dropped by iframe document swaps.
+ */
+export function rebindImageGates(document: Document): ChapterTransformResult {
+  const disposers: Array<() => void> = [];
+  let disposed = false;
+  const isDisposed = () => disposed;
+
+  const bindButton = (
+    button: Element,
+    activate: () => void,
+  ): void => {
+    const onClick = (event: Event): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (isDisposed()) return;
+      activate();
+    };
+    button.addEventListener("click", onClick);
+    // Pointer events are more reliable than click alone in some WebKit builds.
+    button.addEventListener("pointerup", onClick);
+    disposers.push(() => {
+      button.removeEventListener("click", onClick);
+      button.removeEventListener("pointerup", onClick);
+    });
+  };
+
+  for (const button of Array.from(document.querySelectorAll("button"))) {
+    if (!isGateButton(button)) continue;
+
+    // HTML image gate: button immediately before <img data-epub-src>.
+    const next = button.nextElementSibling;
+    if (next && next.tagName.toLowerCase() === "img") {
+      const img = next as HTMLImageElement;
+      if (img.getAttribute("data-epub-src") || img.getAttribute("data-epub-srcset")) {
+        bindButton(button, () => {
+          revealHtmlImage(img);
+        });
+      }
+      continue;
+    }
+
+    // SVG gate: button immediately before <svg> that hosts a gated <image>.
+    if (next && next.tagName.toLowerCase() === "svg") {
+      const images = [
+        ...Array.from(next.getElementsByTagName("image")),
+        ...Array.from(
+          next.getElementsByTagNameNS("http://www.w3.org/2000/svg", "image"),
+        ),
+      ];
+      const gated = images.find((el) => el.getAttribute("data-epub-src"));
+      if (gated) {
+        bindButton(button, () => {
+          revealSvgImage(gated);
+        });
+      }
+    }
+  }
+
+  // Delegated capture-phase handler — survives some iframe reparenting cases and
+  // covers WebKit where direct button listeners may not fire from automation.
+  const onDocClick = (event: Event): void => {
+    if (isDisposed()) return;
+    const target = event.target;
+    if (!target || !(target instanceof Element)) return;
+    const button = target.closest("button");
+    if (!button || !isGateButton(button)) return;
+
+    const next = button.nextElementSibling;
+    if (next && next.tagName.toLowerCase() === "img") {
+      const img = next as HTMLImageElement;
+      if (img.getAttribute("data-epub-src") || img.getAttribute("data-epub-srcset")) {
+        event.preventDefault();
+        event.stopPropagation();
+        revealHtmlImage(img);
+      }
+      return;
+    }
+    if (next && next.tagName.toLowerCase() === "svg") {
+      const images = [
+        ...Array.from(next.getElementsByTagName("image")),
+        ...Array.from(
+          next.getElementsByTagNameNS("http://www.w3.org/2000/svg", "image"),
+        ),
+      ];
+      const gated = images.find((el) => el.getAttribute("data-epub-src"));
+      if (gated) {
+        event.preventDefault();
+        event.stopPropagation();
+        revealSvgImage(gated);
+      }
+    }
+  };
+  document.addEventListener("click", onDocClick, true);
+  disposers.push(() => {
+    document.removeEventListener("click", onDocClick, true);
+  });
+
+  return makeDisposable(disposers, () => disposed, (value) => {
+    disposed = value;
+  });
+}
+
+function isGateButton(button: Element): boolean {
+  const label = button.getAttribute("aria-label") || "";
+  const text = button.textContent?.trim() || "";
+  return (
+    label === GATE_LABEL ||
+    text === GATE_LABEL ||
+    label.includes("圖片載入失敗") ||
+    text.includes("圖片載入失敗")
+  );
+}
+
+function makeDisposable(
+  disposers: Array<() => void>,
+  isDisposed: () => boolean,
+  setDisposed: (value: boolean) => void,
+): ChapterTransformResult {
   return {
     dispose(): void {
-      if (disposed) return;
-      disposed = true;
+      if (isDisposed()) return;
+      setDisposed(true);
       for (let i = disposers.length - 1; i >= 0; i -= 1) {
         try {
           disposers[i]!();

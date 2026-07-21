@@ -14,6 +14,7 @@
 import type { ConversionMode } from "../domain/types";
 import { ChapterConverter } from "./chapter-converter";
 import {
+  rebindImageGates,
   transformChapter,
   type ChapterTransformResult,
 } from "./chapter-transformer";
@@ -405,8 +406,17 @@ class ReaderSessionImpl implements ReaderSession {
   private async afterChapterSettled(gen: number): Promise<void> {
     if (!this.isCurrent(gen)) return;
 
-    const doc = readContentsDocument(this.rendition);
+    // WebKit may expose contents a tick after display() resolves.
+    let doc = readContentsDocument(this.rendition);
+    if (!doc) {
+      await waitMs(50);
+      if (!this.isCurrent(gen)) return;
+      doc = readContentsDocument(this.rendition);
+    }
+
     if (doc) {
+      this.bindLiveChapterDocument(doc);
+
       this.converter.capture(doc);
       try {
         await this.converter.apply(this.conversion, gen);
@@ -417,10 +427,28 @@ class ReaderSessionImpl implements ReaderSession {
           message: errorMessage(error),
         });
       }
+
+      // Re-bind once more after conversion mutations settle (WebKit srcdoc).
+      if (!this.isCurrent(gen)) return;
+      this.bindLiveChapterDocument(doc);
     }
 
     if (!this.isCurrent(gen)) return;
     this.syncLocationFromRendition();
+  }
+
+  private bindLiveChapterDocument(doc: Document): void {
+    // Listeners attached in spine.hooks.content are lost when EPUB.js
+    // serializes the section into the iframe. Rebind gates on the live DOM.
+    if (this.transformResult) {
+      try {
+        this.transformResult.dispose();
+      } catch {
+        // ignore
+      }
+      this.transformResult = null;
+    }
+    this.transformResult = rebindImageGates(doc);
   }
 
   private createRendition(book: AdaptedBook): AdaptedRendition {
@@ -428,14 +456,17 @@ class ReaderSessionImpl implements ReaderSession {
       ...DEFAULT_RENDITION_OPTIONS,
       flow: this.flow === "scrolled" ? "scrolled-doc" : "paginated",
       spread: "none",
-      allowScriptedContent: false,
+      // allow-scripts is required for image-gate listeners inside the EPUB.js
+      // iframe on WebKit. Hostile scripts are still stripped pre-serialization
+      // in transformChapter; this flag only relaxes the iframe sandbox.
+      allowScriptedContent: true,
       width: "100%",
       height: "100%",
     };
 
     const rendition = book.renderTo(this.element, options);
     if (rendition.settings) {
-      rendition.settings.allowScriptedContent = false;
+      rendition.settings.allowScriptedContent = true;
     }
     return rendition;
   }
@@ -808,6 +839,12 @@ function errorMessage(error: unknown): string {
 
 function staleError(): Error {
   return new Error("ReaderSession operation superseded");
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function getRevokeObjectURL(): (url: string) => void {

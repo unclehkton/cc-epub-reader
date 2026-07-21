@@ -173,7 +173,8 @@ export const DEFAULT_RENDITION_OPTIONS: RenditionCreateOptions = {
   flow: "paginated",
   spread: "none",
   manager: "default",
-  allowScriptedContent: false,
+  // Image gates need script-capable sandbox on WebKit; content is sanitized first.
+  allowScriptedContent: true,
 };
 
 /**

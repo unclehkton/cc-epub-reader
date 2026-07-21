@@ -1,5 +1,4 @@
 import JSZip from "jszip";
-import { Book } from "epubjs";
 import type { ValidatedImport } from "../domain/types";
 import { ImportError } from "./import-errors";
 
@@ -61,8 +60,55 @@ function fail(code: ImportError["code"]): never {
 }
 
 /**
+ * Extract a simple Dublin Core text element from OPF XML without a full parser.
+ * Avoids loading EPUB.js during import (WebKit + shell budget).
+ */
+function extractDcText(opfXml: string, localName: string): string | undefined {
+  // Match both <dc:title> and <title xmlns="...dc..."> style tags.
+  const patterns = [
+    new RegExp(
+      `<dc:${localName}\\b[^>]*>([\\s\\S]*?)</dc:${localName}>`,
+      "i",
+    ),
+    new RegExp(
+      `<(?:[A-Za-z_][\\w.-]*:)?${localName}\\b[^>]*>([\\s\\S]*?)</(?:[A-Za-z_][\\w.-]*:)?${localName}>`,
+      "i",
+    ),
+  ];
+  for (const pattern of patterns) {
+    const match = opfXml.match(pattern);
+    if (match?.[1]) {
+      const text = decodeXmlEntities(match[1].replace(/<[^>]+>/g, "").trim());
+      if (text) return text;
+    }
+  }
+  return undefined;
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function packageSignalsEncryption(opfXml: string): boolean {
+  if (/encryption/i.test(opfXml) && /EncryptedData|encryption\.xml/i.test(opfXml)) {
+    return true;
+  }
+  // Manifest item properties="…encrypted…"
+  if (/properties\s*=\s*["'][^"']*\bencrypted\b[^"']*["']/i.test(opfXml)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Validate a local EPUB envelope and extract package metadata.
- * Returns the original Blob (no second full copy). Always destroys EPUB.js resources.
+ * Returns the original Blob (no second full copy). Uses JSZip only — no EPUB.js
+ * on the import path (keeps the library shell lean and WebKit-compatible).
  */
 export async function validateEpub(
   file: Blob | null | undefined,
@@ -109,6 +155,11 @@ export async function validateEpub(
     fail("encrypted");
   }
 
+  // Some DRM packages place rights.xml or META-INF encryption variants.
+  if (zip.file("META-INF/rights.xml")) {
+    // Presence alone is not always DRM, but combined with encryption already handled.
+  }
+
   const containerFile = zip.file("META-INF/container.xml");
   if (!containerFile) {
     fail("missing-container");
@@ -127,79 +178,39 @@ export async function validateEpub(
     fail("missing-package");
   }
 
-  // Pinned EPUB.js spike for packaging metadata.
-  const book = new Book();
-  let validated: ValidatedImport;
+  const packageFile = zip.file(rootPath);
+  if (!packageFile) {
+    fail("missing-package");
+  }
+
+  let opfXml: string;
   try {
-    await book.open(buffer, "binary");
-    await book.ready;
+    opfXml = await packageFile.async("text");
+  } catch {
+    fail("missing-package");
+  }
 
-    const packaging = book.packaging as unknown as
-      | {
-          metadata?: { title?: string; creator?: string };
-          encryption?: unknown;
-          manifest?: Record<string, { properties?: string | string[] }>;
-        }
-      | undefined;
+  if (!opfXml || !/<package\b/i.test(opfXml)) {
+    fail("missing-package");
+  }
 
-    if (packaging?.encryption) {
-      fail("encrypted");
-    }
+  if (packageSignalsEncryption(opfXml)) {
+    fail("encrypted");
+  }
 
-    // Some DRM EPUBs surface encryption properties on manifest items.
-    const manifest = packaging?.manifest;
-    if (manifest) {
-      for (const item of Object.values(manifest)) {
-        const rawProps = item?.properties;
-        const props = Array.isArray(rawProps)
-          ? rawProps.join(" ")
-          : (rawProps ?? "");
-        if (
-          typeof props === "string" &&
-          props.toLowerCase().includes("encrypted")
-        ) {
-          fail("encrypted");
-        }
-      }
-    }
+  const title =
+    extractDcText(opfXml, "title") ||
+    name.replace(/\.epub$/i, "") ||
+    "Untitled";
+  const creator = extractDcText(opfXml, "creator");
 
-    const title =
-      (packaging?.metadata?.title && String(packaging.metadata.title).trim()) ||
-      name.replace(/\.epub$/i, "") ||
-      "Untitled";
-    const creatorRaw = packaging?.metadata?.creator;
-    const creator =
-      creatorRaw !== undefined && String(creatorRaw).trim().length > 0
-        ? String(creatorRaw).trim()
-        : undefined;
-
-    validated = {
-      fileName: name,
-      epub: file,
-      title,
-    };
-    if (creator !== undefined) {
-      validated.creator = creator;
-    }
-  } catch (error) {
-    if (error instanceof ImportError) {
-      throw error;
-    }
-    // Map EPUB.js structural failures without leaking payload text.
-    const message = error instanceof Error ? error.message : "";
-    if (/container/i.test(message)) {
-      fail("missing-container");
-    }
-    if (/package|opf|rootfile/i.test(message)) {
-      fail("missing-package");
-    }
-    fail("invalid-zip");
-  } finally {
-    try {
-      book.destroy();
-    } catch {
-      // EPUB.js may throw during teardown in non-browser environments.
-    }
+  const validated: ValidatedImport = {
+    fileName: name,
+    epub: file,
+    title,
+  };
+  if (creator !== undefined) {
+    validated.creator = creator;
   }
 
   return validated;
