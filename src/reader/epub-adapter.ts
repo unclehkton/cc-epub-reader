@@ -6,6 +6,8 @@
  * {@link loadEpubFactory}. Tests inject a custom {@link EpubFactory}.
  */
 
+import { MAX_ENTRY_UNCOMPRESSED_BYTES } from "../library/epub-validator";
+
 export interface AdaptedDisplayedLocation {
   index: number;
   href: string;
@@ -425,6 +427,19 @@ export async function materializeArchiveUrl(
           if (!out.startsWith("blob:") && !out.startsWith("data:")) {
             continue;
           }
+          // Bound materialised image size (defence against forged ZIP entries).
+          if (out.startsWith("blob:") && typeof fetch === "function") {
+            try {
+              const head = await fetch(out);
+              const blob = await head.blob();
+              if (blob.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+                revokeBlobLike(out);
+                continue;
+              }
+            } catch {
+              // If we cannot size-check, still return the blob — CSP limits network.
+            }
+          }
           if (ownedObjectUrls && out.startsWith("blob:")) {
             ownedObjectUrls.add(out);
           }
@@ -457,63 +472,92 @@ export function purgeArchiveUrlCache(
   }
 }
 
-/**
- * EPUB.js 0.3.93 still *calls* Book.replacements() for every archived book
- * even when settings.replacements is "none" (see book.js: archived || …).
- * Resources.replacements() short-circuits on "none", but serialize hooks and
- * any partial state can still linger. Force a clean no-replacement mode after
- * open and revoke any eagerly created blob URLs.
- */
-export function enforceNoArchiveReplacements(book: AdaptedBook): void {
-  const anyBook = book as AdaptedBook & {
+type ArchiveBookGuard = AdaptedBook & {
+  settings?: { replacements?: string };
+  replacements?: () => Promise<unknown>;
+  resources?: {
     settings?: { replacements?: string };
+    replacementUrls?: Array<string | null | undefined>;
+    urls?: string[];
+    cssUrls?: string[];
     replacements?: () => Promise<unknown>;
-    resources?: {
-      settings?: { replacements?: string };
-      replacementUrls?: Array<string | null | undefined>;
-      urls?: string[];
-    };
+    replaceCss?: (...args: unknown[]) => Promise<unknown>;
+    substitute?: (content: string, url?: string) => string;
   };
+};
+
+function revokeBlobLike(url: string): void {
+  if (!url.startsWith("blob:")) return;
+  if (typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") {
+    return;
+  }
+  try {
+    URL.revokeObjectURL(url);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Install the no-replacement guard *before* `book.ready`.
+ *
+ * EPUB.js 0.3.93 still *calls* `Book.replacements()` for every archived book
+ * even when `settings.replacements === "none"` (book.js: `archived || …`).
+ * That path also runs `resources.replaceCss()`, which eagerly blobifies every
+ * stylesheet. Patch `book.replacements` immediately so packaging cannot start
+ * archive-wide materialization.
+ */
+export function installNoArchiveReplacementsGuard(book: AdaptedBook): void {
+  const anyBook = book as ArchiveBookGuard;
 
   if (anyBook.settings) {
     anyBook.settings.replacements = "none";
   }
-  if (anyBook.resources?.settings) {
-    anyBook.resources.settings.replacements = "none";
-  }
 
-  const revoke =
-    typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function"
-      ? (u: string) => URL.revokeObjectURL(u)
-      : () => undefined;
+  const armResources = (): void => {
+    const resources = anyBook.resources;
+    if (!resources) return;
+    if (resources.settings) {
+      resources.settings.replacements = "none";
+    }
+    // Neutralize CSS/archive blob creation even if something re-enters later.
+    resources.replacements = () => Promise.resolve(resources.urls ?? []);
+    resources.replaceCss = () => Promise.resolve([]);
+    // substitute with empty replacement map is a no-op identity.
+    resources.substitute = (content: string) => content;
+  };
+
+  armResources();
+
+  anyBook.replacements = () => {
+    armResources();
+    return Promise.resolve(anyBook);
+  };
+}
+
+/**
+ * After `book.ready`, re-assert the guard and revoke any blobs that slipped
+ * through before the patch (race / partial packaging).
+ */
+export function enforceNoArchiveReplacements(book: AdaptedBook): void {
+  installNoArchiveReplacementsGuard(book);
+
+  const anyBook = book as ArchiveBookGuard;
 
   const replacements = anyBook.resources?.replacementUrls;
   if (Array.isArray(replacements)) {
     for (const url of replacements) {
-      if (typeof url === "string" && url.startsWith("blob:")) {
-        try {
-          revoke(url);
-        } catch {
-          // ignore
-        }
-      }
+      if (typeof url === "string") revokeBlobLike(url);
     }
     anyBook.resources!.replacementUrls = [];
   }
 
   if (anyBook.archive?.urlCache) {
     for (const [key, value] of Object.entries(anyBook.archive.urlCache)) {
-      if (typeof value === "string" && value.startsWith("blob:")) {
-        try {
-          revoke(value);
-        } catch {
-          // ignore
-        }
+      if (typeof value === "string") {
+        revokeBlobLike(value);
         delete anyBook.archive.urlCache[key];
       }
     }
   }
-
-  // Future calls must not rebuild the archive-wide blob map.
-  anyBook.replacements = () => Promise.resolve(anyBook);
 }

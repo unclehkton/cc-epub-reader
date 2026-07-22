@@ -73,6 +73,14 @@ class SessionOnlyRepository implements LibraryRepository {
     return book;
   }
 
+  /** Adopt a durable book (same id) when falling back mid-session. */
+  adoptBook(book: StoredBook): void {
+    this.books.set(book.id, {
+      ...book,
+      epub: book.epub,
+    });
+  }
+
   async deleteBook(id: string): Promise<void> {
     this.books.delete(id);
     this.progress.delete(id);
@@ -277,11 +285,63 @@ class ResilientLibraryRepository implements LibraryRepository {
       await this.active().saveProgress(progress);
     } catch (error) {
       if (this.mode === "durable" && isStorageFailure(error)) {
+        // Copy the open book into session storage so progress still has a host.
+        try {
+          const book = await this.durable.getBook(progress.bookId);
+          if (book) this.session.adoptBook(book);
+        } catch {
+          // Best-effort; progress may still be recorded without payload.
+        }
         this.forceSessionOnly(
           "無法寫入閱讀進度到本機書庫，已改為工作階段模式。",
         );
         await this.session.saveProgress(progress);
         return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Promote a staged share into the active library. On durable quota failure,
+   * fall back to session-only import so the user still gets the book.
+   */
+  async promoteShare(
+    shareId: string,
+    validated: ValidatedImport,
+    options?: {
+      deleteShare?: (id: string) => Promise<void>;
+    },
+  ): Promise<StoredBook> {
+    const deleteShare = options?.deleteShare;
+    if (this.mode === "session") {
+      const book = await this.session.importBook(validated);
+      if (deleteShare) {
+        try {
+          await deleteShare(shareId);
+        } catch {
+          // non-fatal
+        }
+      }
+      return book;
+    }
+
+    try {
+      return await this.durable.promoteShare(shareId, validated);
+    } catch (error) {
+      if (isStorageFailure(error)) {
+        this.forceSessionOnly(
+          "本機儲存空間不足。已改為工作階段模式匯入分享的 EPUB：重新載入後不會保留。",
+        );
+        const book = await this.session.importBook(validated);
+        if (deleteShare) {
+          try {
+            await deleteShare(shareId);
+          } catch {
+            // non-fatal
+          }
+        }
+        return book;
       }
       throw error;
     }
@@ -354,10 +414,7 @@ export function App() {
   }, [repository]);
 
   useEffect(() => {
-    if (!idbReady || sessionOnly) {
-      if (idbReady && sessionOnly) {
-        setShareBootstrapping(false);
-      }
+    if (!idbReady) {
       return;
     }
 
@@ -403,7 +460,10 @@ export function App() {
         }
 
         const validated = await validateEpub(entry.epub, entry.fileName);
-        await durableRepository.promoteShare(shareId, validated);
+        // Resilient promote: durable first, session-only on quota.
+        await repository.promoteShare(shareId, validated, {
+          deleteShare: deleteShareInboxEntry,
+        });
         // Clear the query only after a successful promote so transient failures
         // keep a retry path via the still-staged inbox id.
         clearShareImportQuery();
@@ -437,7 +497,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [idbReady, sessionOnly, durableRepository]);
+  }, [idbReady, repository]);
 
   const handleOpenBook = useCallback(
     async (next: BookSelection) => {

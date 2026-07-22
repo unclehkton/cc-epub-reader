@@ -186,3 +186,66 @@ Addressed in code after the independent re-review above (and the follow-up block
 | `npm audit` | **0** vulnerabilities |
 
 Still open for a later review cycle: full allowlist sanitizer (vs denylist), epubjs 0.4 major upgrade / maintained fork decision, real maskable artwork (not solid placeholders), physical iPhone Safari, live `books.pkwor.com` canary.
+
+## Independent verification of blocker pass — 2026-07-22
+
+**Verdict: changes requested; do not deploy yet.** The remediation above fixes several prior findings, but the fresh full matrix failed and source review found remaining release blockers.
+
+### Verified fixed
+
+- Rendition and session now use `allowScriptedContent: false`; chapter CSP also blocks scripts.
+- Literal `replacements: "none"` replaces the ineffective falsy setting, and revoked chapter URLs are removed from EPUB.js cache.
+- Image materialization fails closed to `blob:`/`data:` URLs and click/pointer duplication is removed.
+- The `@xmldom/xmldom` override clears the previous dependency advisories: fresh `npm audit --json` reports zero vulnerabilities.
+
+### Remaining blockers and partial fixes
+
+1. **Parent image gates are positioned in the wrong coordinate system.** `reader-session.ts:531-533` applies iframe-local image coordinates directly to top-document fixed buttons without adding the iframe rectangle. After one reveal, lines 567-568 splice only the button array, not the paired image array, so later overlays track the wrong image.
+2. **WebKit image-gate flow fails end to end.** The fresh matrix timed out for the WebKit reader scenario waiting for a parent gate. The failure screenshot showed the chapter without the required `點擊顯示圖片` control.
+3. **Archive-wide CSS materialization remains possible.** EPUB.js still runs stylesheet replacement work before `book.ready`; `enforceNoArchiveReplacements()` is called only after that await. The literal `none` short-circuits general resources but EPUB.js still traverses/replaces CSS.
+4. **Session fallback remains incomplete.** Normal import/progress failures retry session storage, but share promotion still calls `durableRepository.importBook()` directly. A storage/quota failure produces a generic share error instead of a session-only retry. Progress-write fallback also does not copy the active durable book into the session repository.
+5. **Share expiry remains memory-heavy.** `openCursor()` improves peak use over `getAll()`, but reading `cursor.value` still clones one complete EPUB buffer—up to 100 MiB—just to inspect its timestamp.
+6. **ZIP limits still trust declared sizes.** Forged central-directory sizes can remain below the declared ceiling while decompression allocates oversized output before JSZip checks the final length.
+7. **False-green evidence remains.** WebKit offline can still pass from Cache Storage evidence; resume does not assert both restored CFIs; image helper retains force-click fallback; iframe sandbox attributes are not inspected.
+8. **External links are not safely opened.** The transformed `_blank` marker has no parent-side consumer while the iframe lacks popup permission; protocol-relative links are not covered and may navigate the iframe externally.
+9. **`srcset` materialization is not fail-closed.** When a candidate cannot be materialized, the original package-relative path is retained and assigned to live `srcset`. Chapter CSP currently blocks network fallback, but the intended URL boundary is violated.
+
+### Fresh verification
+
+| Gate | Result |
+| --- | --- |
+| `npm ci` | pass; 497 packages installed |
+| `npm run check` | pass |
+| `npm run test:run` | **112/112** passed across 17 files |
+| `npm run build` / `check:bundle` | pass; shell **59,201 bytes gzip** |
+| `npm audit --json` | pass; **0 vulnerabilities** |
+| `npm run test:e2e` | **fail: 31/32 passed**; WebKit reader image-gate scenario timed out after 180 seconds; command exited non-zero after 450.7 seconds |
+
+The Windows Playwright process teardown remains fixed: despite the failing test, the bounded command exited rather than hanging indefinitely.
+
+## Deep remediation of remaining blockers — 2026-07-22 (pass 3)
+
+| Remaining blocker | Deep fix |
+| --- | --- |
+| Parent image-gate wrong coordinates / pair splice | Map iframe-local `getBoundingClientRect()` through `iframe.getBoundingClientRect()`; keep `{img, inFrameButton, button}` pairs; stage fallback when image has zero box |
+| WebKit image-gate end-to-end | Coordinate fix + stage parking + real hit-test clicks (no force); full matrix green including WebKit/Mobile Safari |
+| Archive-wide CSS materialization before ready | `installNoArchiveReplacementsGuard()` **before** `book.ready` no-ops `Book.replacements` / `replaceCss` / `resources.replacements` |
+| Session fallback incomplete | Share promote via resilient repo; progress fallback `adoptBook()` copies durable payload into session |
+| Share expiry memory-heavy | IDB v3 `byReceivedAt` index + `openKeyCursor` (no EPUB buffer load) |
+| ZIP declared-size trust | `readZipTextBounded` measures actual `uint8array` length post-decompress; materialize size-checks blobs |
+| External links unsafe | Protocol-relative → `https:`; parent click bridge `window.open(..., "noopener,noreferrer")` |
+| `srcset` not fail-closed | Only assign verified `blob:`/`data:` candidates; drop unresolved tokens |
+| False-green evidence | Offline requires real navigation on all projects; resume asserts distinct chapter titles; image gate real hit-test only; sandbox inspected for no `allow-scripts` |
+| Maskable icon identical | Regenerated distinct maskable-512 with larger safe-zone padding + glyph |
+
+### Pass-3 gates
+
+| Gate | Result |
+| --- | --- |
+| `npm run check` | pass |
+| `npm run test:run` | **115** tests / 17 files |
+| `npm run build` / `check:bundle` | pass (shell ~60 KiB gzip) |
+| `npm audit` | **0** vulnerabilities |
+| `npm run test:e2e` | **32/32** (~2.6 min; chromium, webkit, Mobile Chrome, Mobile Safari) |
+
+Still out of scope for automated release evidence: physical iPhone Safari, live `books.pkwor.com` canary, full allowlist sanitizer rewrite, epubjs 0.4 major migration.

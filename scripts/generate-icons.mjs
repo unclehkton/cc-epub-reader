@@ -25,8 +25,17 @@ function chunk(type, data) {
   return Buffer.concat([len, typeBuf, data, crcBuf]);
 }
 
-/** Solid jade-green PNG of size×size. */
-function solidPng(size, rgb = [0x20, 0x5f, 0x50]) {
+/**
+ * PNG icon with optional maskable safe-zone padding.
+ * Normal icons fill the canvas; maskable keeps a larger padded edge so OS
+ * masks do not clip the mark.
+ */
+function makePng(size, options = {}) {
+  const rgb = options.rgb ?? [0x20, 0x5f, 0x50];
+  const maskable = options.maskable === true;
+  // Maskable safe zone is ~80% center; use 12% edge pad vs 4% for normal.
+  const borderRatio = maskable ? 0.12 : 0.04;
+  const edgeBg = maskable ? [0xf7, 0xf5, 0xed] : rgb;
   const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(size, 0);
@@ -39,23 +48,46 @@ function solidPng(size, rgb = [0x20, 0x5f, 0x50]) {
 
   const stride = 1 + size * 3;
   const raw = Buffer.alloc(stride * size);
+  const border = Math.floor(size * borderRatio);
+  const cx = (size - 1) / 2;
+  const cy = (size - 1) / 2;
+  const glyphR = size * (maskable ? 0.22 : 0.28);
+
   for (let y = 0; y < size; y++) {
     const row = y * stride;
     raw[row] = 0; // filter none
     for (let x = 0; x < size; x++) {
       const i = row + 1 + x * 3;
-      // Safe-zone for maskable: keep center 80% solid; edges slightly lighter.
       const edge = Math.min(x, y, size - 1 - x, size - 1 - y);
-      const border = Math.floor(size * 0.1);
+      let r = rgb[0];
+      let g = rgb[1];
+      let b = rgb[2];
       if (edge < border) {
-        raw[i] = 0xf7;
-        raw[i + 1] = 0xf5;
-        raw[i + 2] = 0xed;
+        r = edgeBg[0];
+        g = edgeBg[1];
+        b = edgeBg[2];
       } else {
-        raw[i] = rgb[0];
-        raw[i + 1] = rgb[1];
-        raw[i + 2] = rgb[2];
+        // Simple book-mark glyph in the safe zone so assets are not identical.
+        const dx = x - cx;
+        const dy = y - cy;
+        const inGlyph =
+          Math.abs(dx) < glyphR * 0.55 && Math.abs(dy) < glyphR * 0.85;
+        const spine = dx > -glyphR * 0.55 && dx < -glyphR * 0.25 && Math.abs(dy) < glyphR * 0.85;
+        if (inGlyph) {
+          if (spine) {
+            r = 0x14;
+            g = 0x3d;
+            b = 0x34;
+          } else {
+            r = 0xe8;
+            g = 0xf0;
+            b = 0xec;
+          }
+        }
       }
+      raw[i] = r;
+      raw[i + 1] = g;
+      raw[i + 2] = b;
     }
   }
   const compressed = zlib.deflateSync(raw, { level: 9 });
@@ -68,10 +100,19 @@ function solidPng(size, rgb = [0x20, 0x5f, 0x50]) {
 }
 
 fs.mkdirSync(outDir, { recursive: true });
-fs.writeFileSync(path.join(outDir, "icon-192.png"), solidPng(192));
-fs.writeFileSync(path.join(outDir, "icon-512.png"), solidPng(512));
-fs.writeFileSync(path.join(outDir, "maskable-512.png"), solidPng(512));
+const icon192 = makePng(192, { maskable: false });
+const icon512 = makePng(512, { maskable: false });
+const maskable512 = makePng(512, { maskable: true });
+fs.writeFileSync(path.join(outDir, "icon-192.png"), icon192);
+fs.writeFileSync(path.join(outDir, "icon-512.png"), icon512);
+fs.writeFileSync(path.join(outDir, "maskable-512.png"), maskable512);
 const s192 = fs.statSync(path.join(outDir, "icon-192.png")).size;
 const s512 = fs.statSync(path.join(outDir, "icon-512.png")).size;
-console.log("wrote icons", { s192, s512 });
-if (s192 < 200 || s512 < 500) process.exit(1);
+const sMask = fs.statSync(path.join(outDir, "maskable-512.png")).size;
+console.log("wrote icons", { s192, s512, sMask });
+if (s192 < 200 || s512 < 500 || sMask < 500) process.exit(1);
+// Maskable must differ from the normal 512 so installers get a real safe zone.
+if (Buffer.compare(icon512, maskable512) === 0) {
+  console.error("maskable-512 must not be byte-identical to icon-512");
+  process.exit(1);
+}

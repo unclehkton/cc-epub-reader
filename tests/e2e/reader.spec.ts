@@ -66,11 +66,21 @@ test.describe("reader", () => {
     await expect(page.locator(".reader-chapter-title")).toContainText(/第二章|图片/, {
       timeout: 30_000,
     });
+    const firstResumeCfi = await page.evaluate(() => {
+      const host = document.querySelector("[aria-label^='閱讀']");
+      return host?.getAttribute("data-resume-cfi") || null;
+    });
+    // Progress bar / chapter title already prove resume; capture title as evidence.
+    const firstChapterTitle = await page.locator(".reader-chapter-title").innerText();
     await closeReader(page);
 
     // Re-open second book — distinct resume location from the first.
     await openBook(page, "长章节压力夹具");
     await expect(page.getByLabel(/閱讀：/)).toBeVisible();
+    const secondChapterTitle = await page.locator(".reader-chapter-title").innerText();
+    // Distinct restored chapter context for the two books.
+    expect(secondChapterTitle).not.toEqual(firstChapterTitle);
+    void firstResumeCfi;
     await closeReader(page);
 
     // Re-open first book and exercise flow switch + conversion + image gate.
@@ -191,5 +201,15 @@ test.describe("reader", () => {
       }
     }
     expect(sawCsp).toBe(true);
+
+    // Iframe sandbox must not grant allow-scripts for chapter content.
+    const sandboxAttrs = await page.locator(".reader-stage iframe, iframe").evaluateAll((frames) =>
+      frames.map((f) => (f as HTMLIFrameElement).getAttribute("sandbox") || ""),
+    );
+    // When EPUB.js sets a sandbox, it must not include allow-scripts.
+    for (const sandbox of sandboxAttrs) {
+      if (!sandbox) continue;
+      expect(sandbox.split(/\s+/)).not.toContain("allow-scripts");
+    }
   });
 });

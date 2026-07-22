@@ -166,17 +166,15 @@ export async function clickImageGate(page: Page): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     // Prefer parent-document overlay gates (allowScriptedContent: false path).
-    // Real hit-test click first; force only as fallback for flaky layout.
+    // Real hit-test only — no force-click / synthetic dispatch false green.
     const parentGates = page.locator(
       "button.epub-parent-image-gate, body > button[aria-label='點擊顯示圖片']",
     );
-    if ((await parentGates.count()) > 0) {
+    const parentCount = await parentGates.count();
+    if (parentCount > 0) {
       const gate = parentGates.first();
-      try {
-        await gate.click({ timeout: 2_000 });
-      } catch {
-        await gate.click({ force: true });
-      }
+      await expect(gate).toBeVisible({ timeout: 5_000 });
+      await gate.click({ timeout: 5_000 });
       await page.waitForTimeout(600);
       return;
     }
@@ -185,11 +183,7 @@ export async function clickImageGate(page: Page): Promise<void> {
       try {
         const gate = frame.getByRole("button", { name: "點擊顯示圖片" });
         if ((await gate.count()) > 0) {
-          try {
-            await gate.first().click({ timeout: 2_000 });
-          } catch {
-            await gate.first().click({ force: true });
-          }
+          await gate.first().click({ timeout: 5_000 });
           await page.waitForTimeout(600);
           return;
         }

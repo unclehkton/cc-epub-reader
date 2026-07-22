@@ -80,30 +80,63 @@ export async function expireShareInbox(
 ): Promise<number> {
   const db = await openDatabase();
   try {
-    // Cursor walk collects only expired ids without getAll() of every EPUB buffer.
+    // Prefer the byReceivedAt index + openKeyCursor so we never materialize
+    // complete EPUB buffers merely to inspect timestamps.
     const expiredIds: string[] = [];
     await new Promise<void>((resolve, reject) => {
       const readTx = db.transaction("shareInbox", "readonly");
       const store = readTx.objectStore("shareInbox");
-      const cursorReq = store.openCursor();
-      cursorReq.onsuccess = () => {
-        const cursor = cursorReq.result;
+      const cutoff = now - SHARE_INBOX_TTL_MS;
+
+      const walkValueCursor = (): void => {
+        // Fallback for pre-v3 DBs without the index (should be rare after open).
+        const cursorReq = store.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            resolve();
+            return;
+          }
+          const entry = cursor.value as { id?: unknown; receivedAt?: unknown };
+          if (
+            typeof entry.id === "string" &&
+            typeof entry.receivedAt === "number" &&
+            entry.receivedAt < cutoff
+          ) {
+            expiredIds.push(entry.id);
+          }
+          // Advance without retaining the value.
+          cursor.continue();
+        };
+        cursorReq.onerror = () => {
+          reject(cursorReq.error ?? new Error("shareInbox cursor failed"));
+        };
+      };
+
+      if (!store.indexNames.contains("byReceivedAt")) {
+        walkValueCursor();
+        return;
+      }
+
+      const index = store.index("byReceivedAt");
+      // Only keys older than the cutoff: IDBKeyRange.upperBound(cutoff, true)
+      // excludes the boundary; expired means receivedAt < cutoff.
+      const range = IDBKeyRange.upperBound(cutoff, true);
+      const keyCursorReq = index.openKeyCursor(range);
+      keyCursorReq.onsuccess = () => {
+        const cursor = keyCursorReq.result;
         if (!cursor) {
           resolve();
           return;
         }
-        const entry = cursor.value as { id?: unknown; receivedAt?: unknown };
-        if (
-          typeof entry.id === "string" &&
-          typeof entry.receivedAt === "number" &&
-          now - entry.receivedAt > SHARE_INBOX_TTL_MS
-        ) {
-          expiredIds.push(entry.id);
+        const id = cursor.primaryKey;
+        if (typeof id === "string") {
+          expiredIds.push(id);
         }
         cursor.continue();
       };
-      cursorReq.onerror = () => {
-        reject(cursorReq.error ?? new Error("shareInbox cursor failed"));
+      keyCursorReq.onerror = () => {
+        reject(keyCursorReq.error ?? new Error("shareInbox key cursor failed"));
       };
     });
 

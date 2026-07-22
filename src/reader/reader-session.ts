@@ -23,6 +23,7 @@ import {
   DEFAULT_RENDITION_OPTIONS,
   loadEpubFactory,
   enforceNoArchiveReplacements,
+  installNoArchiveReplacementsGuard,
   materializeArchiveUrl,
   purgeArchiveUrlCache,
   type AdaptedBook,
@@ -133,10 +134,18 @@ class ReaderSessionImpl implements ReaderSession {
   private readonly ownedObjectUrls = new Set<string>();
   /** Blob URLs created for the active chapter's revealed images only. */
   private readonly chapterObjectUrls = new Set<string>();
-  /** Parent-document gate buttons (WebKit-safe without iframe allow-scripts). */
-  private readonly parentGateButtons: HTMLButtonElement[] = [];
+  /**
+   * Parent-document gate overlays paired with in-iframe images.
+   * Kept as one array so reveal cannot desync button indices from image pairs.
+   */
+  private parentGatePairs: Array<{
+    img: HTMLImageElement;
+    inFrameButton: HTMLElement;
+    button: HTMLButtonElement;
+  }> = [];
   private parentGateRepositionTimer: ReturnType<typeof setInterval> | null =
     null;
+  private externalLinkDisposer: (() => void) | null = null;
   private readonly converter = new ChapterConverter();
   private transformResult: ChapterTransformResult | null = null;
   private spineContentHook: ((...args: unknown[]) => unknown) | null = null;
@@ -201,13 +210,16 @@ class ReaderSessionImpl implements ReaderSession {
 
       const book = factory(buffer, { replacements: "none" });
       this.book = book;
+      // MUST run before book.ready — packaging calls Book.replacements() for
+      // every archived book and would otherwise blobify all CSS/assets.
+      installNoArchiveReplacementsGuard(book);
       this.registerSpineTransform(book);
 
       await book.ready;
       if (!this.isCurrent(gen)) {
         throw staleError();
       }
-      // epubjs may still enter replacements() for archived books; hard-disable.
+      // Re-assert guard + revoke anything that raced the pre-ready patch.
       enforceNoArchiveReplacements(book);
 
       this.spineCount = readSpineCount(book);
@@ -468,6 +480,7 @@ class ReaderSessionImpl implements ReaderSession {
     this.transformResult = rebindImageGates(doc, {
       materializeArchiveUrl: materialize,
     });
+    this.installExternalLinkBridge(doc);
     // Sandbox without allow-scripts: in-iframe listeners are unreliable on
     // WebKit. Parent-document overlay buttons receive real clicks safely.
     this.installParentImageGates(doc, materialize);
@@ -478,20 +491,66 @@ class ReaderSessionImpl implements ReaderSession {
       clearInterval(this.parentGateRepositionTimer);
       this.parentGateRepositionTimer = null;
     }
-    for (const button of this.parentGateButtons) {
+    for (const pair of this.parentGatePairs) {
       try {
-        button.remove();
+        pair.button.remove();
       } catch {
         // ignore
       }
     }
-    this.parentGateButtons.length = 0;
+    this.parentGatePairs = [];
+  }
+
+  private clearExternalLinkBridge(): void {
+    if (this.externalLinkDisposer) {
+      try {
+        this.externalLinkDisposer();
+      } catch {
+        // ignore
+      }
+      this.externalLinkDisposer = null;
+    }
+  }
+
+  /**
+   * Parent-context click bridge for external anchors. iframe sandbox lacks
+   * allow-popups, so target=_blank alone cannot open a safe new tab; we open
+   * from the parent with noopener instead.
+   */
+  private installExternalLinkBridge(doc: Document): void {
+    this.clearExternalLinkBridge();
+    const onClick = (event: Event): void => {
+      const target = event.target;
+      if (!target || !(target instanceof Element)) return;
+      const anchor = target.closest("a[data-epub-external='1']");
+      if (!anchor) return;
+      const href = (anchor.getAttribute("href") || "").trim();
+      if (!href) return;
+      const lower = href.toLowerCase();
+      let absolute = href;
+      if (lower.startsWith("//")) {
+        absolute = `https:${href}`;
+      } else if (!lower.startsWith("http:") && !lower.startsWith("https:")) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        window.open(absolute, "_blank", "noopener,noreferrer");
+      } catch {
+        // Popup blocked — leave the link inert rather than navigating the iframe.
+      }
+    };
+    doc.addEventListener("click", onClick, true);
+    this.externalLinkDisposer = () => {
+      doc.removeEventListener("click", onClick, true);
+    };
   }
 
   /**
    * Place parent-document gate controls over gated images inside the iframe.
-   * Works with allowScriptedContent: false because handlers live outside the
-   * sandboxed chapter document.
+   * Coordinates map iframe-local getBoundingClientRect() into the top document
+   * by adding the iframe's own rect (required for position:fixed overlays).
    */
   private installParentImageGates(
     doc: Document,
@@ -502,8 +561,10 @@ class ReaderSessionImpl implements ReaderSession {
     const iframe = this.element.querySelector("iframe");
     if (!iframe || !materialize) return;
 
-    const pairs: Array<{ img: HTMLImageElement; inFrameButton: HTMLElement }> =
-      [];
+    const candidates: Array<{
+      img: HTMLImageElement;
+      inFrameButton: HTMLElement;
+    }> = [];
     for (const img of Array.from(
       doc.querySelectorAll("img[data-epub-src]"),
     ) as HTMLImageElement[]) {
@@ -515,29 +576,62 @@ class ReaderSessionImpl implements ReaderSession {
         continue;
       }
       const inFrameButton = prev as HTMLElement;
-      pairs.push({ img, inFrameButton });
+      candidates.push({ img, inFrameButton });
       // Prefer parent control for activation; keep label for a11y in content.
       inFrameButton.setAttribute("aria-hidden", "true");
       inFrameButton.style.pointerEvents = "none";
       inFrameButton.style.opacity = "0.35";
     }
 
+    if (candidates.length === 0) {
+      // Fallback: gated images without a sibling button (serialization quirks).
+      for (const img of Array.from(
+        doc.querySelectorAll("img[data-epub-src]"),
+      ) as HTMLImageElement[]) {
+        candidates.push({ img, inFrameButton: img as unknown as HTMLElement });
+      }
+    }
+
+    const stage = this.element.getBoundingClientRect();
+
+    const mapRectToTop = (
+      img: HTMLImageElement,
+    ): { left: number; top: number; width: number; height: number } => {
+      const iframeRect = iframe.getBoundingClientRect();
+      const rect = img.getBoundingClientRect();
+      // iframe-local coordinates → top-document viewport.
+      return {
+        left: iframeRect.left + rect.left,
+        top: iframeRect.top + rect.top,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+
     const reposition = (): void => {
-      for (let i = 0; i < this.parentGateButtons.length; i += 1) {
-        const button = this.parentGateButtons[i];
-        const pair = pairs[i];
-        if (!button || !pair) continue;
+      for (const pair of this.parentGatePairs) {
         try {
-          const rect = pair.img.getBoundingClientRect();
-          button.style.left = `${Math.max(0, rect.left)}px`;
-          button.style.top = `${Math.max(0, rect.top - 48)}px`;
+          const mapped = mapRectToTop(pair.img);
+          const hasBox = mapped.width > 2 && mapped.height > 2;
+          if (hasBox) {
+            pair.button.style.left = `${Math.max(0, mapped.left)}px`;
+            pair.button.style.top = `${Math.max(0, mapped.top - 48)}px`;
+            pair.button.style.visibility = "visible";
+          } else {
+            // Image not laid out yet — park the control in the reader stage so
+            // WebKit still exposes a tappable gate.
+            const stageRect = this.element.getBoundingClientRect();
+            pair.button.style.left = `${Math.max(8, stageRect.left + 8)}px`;
+            pair.button.style.top = `${Math.max(8, stageRect.top + 56)}px`;
+            pair.button.style.visibility = "visible";
+          }
         } catch {
           // ignore
         }
       }
     };
 
-    for (const pair of pairs) {
+    for (const candidate of candidates) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = "點擊顯示圖片";
@@ -550,6 +644,12 @@ class ReaderSessionImpl implements ReaderSession {
       button.style.minHeight = "44px";
       button.style.pointerEvents = "auto";
       button.style.maxWidth = "12rem";
+      button.style.visibility = "hidden";
+      const pair = {
+        img: candidate.img,
+        inFrameButton: candidate.inFrameButton,
+        button,
+      };
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -562,16 +662,21 @@ class ReaderSessionImpl implements ReaderSession {
             return;
           }
           pair.img.setAttribute("src", url);
-          pair.inFrameButton.hidden = true;
+          if (pair.inFrameButton !== pair.img) {
+            pair.inFrameButton.hidden = true;
+          }
           button.remove();
-          const idx = this.parentGateButtons.indexOf(button);
-          if (idx >= 0) this.parentGateButtons.splice(idx, 1);
+          const idx = this.parentGatePairs.indexOf(pair);
+          if (idx >= 0) this.parentGatePairs.splice(idx, 1);
         })();
       });
       document.body.appendChild(button);
-      this.parentGateButtons.push(button);
+      this.parentGatePairs.push(pair);
     }
+    // First layout may need a frame; stage fallback keeps buttons reachable.
+    void stage;
     reposition();
+    requestAnimationFrame(reposition);
     this.parentGateRepositionTimer = setInterval(reposition, 400);
   }
 
@@ -692,6 +797,7 @@ class ReaderSessionImpl implements ReaderSession {
   private teardownChapter(): void {
     this.converter.destroy();
     this.clearParentImageGates();
+    this.clearExternalLinkBridge();
     if (this.transformResult) {
       try {
         this.transformResult.dispose();

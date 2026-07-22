@@ -74,6 +74,33 @@ function assertEntrySize(entry: unknown, maxBytes: number): void {
 }
 
 /**
+ * Decompress a text entry with a hard post-expand ceiling. Declared central-
+ * directory sizes can be forged; measuring the actual output is required.
+ */
+async function readZipTextBounded(
+  entry: { async: (type: "uint8array") => Promise<Uint8Array> },
+  maxBytes: number,
+): Promise<string> {
+  assertEntrySize(entry, maxBytes);
+  // Prefer uint8array so byte length is exact (not UTF-16 code units).
+  const bytes = await entry.async("uint8array");
+  if (bytes.byteLength > maxBytes) {
+    fail("too-large");
+  }
+  // Decode as text for XML parsing callers.
+  if (typeof TextDecoder !== "undefined") {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+  // Fallback for rare environments without TextDecoder.
+  let out = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    out += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return out;
+}
+
+/**
  * Reject archives whose declared per-entry or aggregate expansion exceeds limits.
  * Declared sizes can be forged; this is a best-effort pre-decompress gate only.
  */
@@ -239,10 +266,11 @@ export async function validateEpub(
   let rootPath: string | undefined;
   try {
     assertEntrySize(containerFile, MAX_METADATA_ENTRY_BYTES);
-    const containerXml = await containerFile.async("text");
-    if (containerXml.length > MAX_METADATA_ENTRY_BYTES) {
-      fail("too-large");
-    }
+    // Stream-bounded read so forged declared sizes cannot expand past ceiling.
+    const containerXml = await readZipTextBounded(
+      containerFile,
+      MAX_METADATA_ENTRY_BYTES,
+    );
     const match = containerXml.match(/full-path\s*=\s*["']([^"']+)["']/i);
     rootPath = match?.[1];
   } catch (error) {
@@ -262,10 +290,7 @@ export async function validateEpub(
   let opfXml: string;
   try {
     assertEntrySize(packageFile, MAX_METADATA_ENTRY_BYTES);
-    opfXml = await packageFile.async("text");
-    if (opfXml.length > MAX_METADATA_ENTRY_BYTES) {
-      fail("too-large");
-    }
+    opfXml = await readZipTextBounded(packageFile, MAX_METADATA_ENTRY_BYTES);
   } catch (error) {
     if (error instanceof ImportError) throw error;
     fail("missing-package");

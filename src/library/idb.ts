@@ -1,6 +1,10 @@
 export const DB_NAME = "books-reader";
-/** v2 splits book metadata from EPUB payloads so listBooks is memory-safe. */
-export const DB_VERSION = 2;
+/**
+ * v2 splits book metadata from EPUB payloads so listBooks is memory-safe.
+ * v3 adds shareInbox receivedAt index so expiry can walk keys without loading
+ * full EPUB buffers.
+ */
+export const DB_VERSION = 3;
 
 export type StoreName =
   | "bookMeta"
@@ -44,6 +48,11 @@ export function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains("shareInbox")) {
         db.createObjectStore("shareInbox", { keyPath: "id" });
+      }
+      // Index timestamps so expiry can openKeyCursor without cloning EPUB bytes.
+      const shareStore = tx.objectStore("shareInbox");
+      if (!shareStore.indexNames.contains("byReceivedAt")) {
+        shareStore.createIndex("byReceivedAt", "receivedAt", { unique: false });
       }
       if (!db.objectStoreNames.contains("settings")) {
         db.createObjectStore("settings", { keyPath: "key" });

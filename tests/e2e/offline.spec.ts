@@ -67,24 +67,16 @@ test.describe("offline", () => {
       }
     }
 
-    // Chromium (desktop + mobile) must complete real offline navigation.
-    // WebKit on Windows automation may throw internal errors; only then may
-    // the suite fall back to precache evidence — never for Chromium projects.
+    // All projects must complete real offline navigation when the runner can
+    // do so. WebKit-on-Windows automation sometimes throws an internal error
+    // before SW can answer; that is recorded as a known gap and fails the
+    // test unless the offline document actually loads.
     if (!navigatedOffline) {
+      // Do not pass from Cache Storage evidence alone — that is false green.
       expect(
-        browserName === "webkit",
-        "Offline navigation must succeed outside known WebKit automation gaps",
+        navigatedOffline,
+        `Offline navigation failed (${browserName}); Cache Storage alone is not sufficient release evidence`,
       ).toBe(true);
-      expect(precacheEvidence.controlled || precacheEvidence.cacheCount > 0).toBe(
-        true,
-      );
-      test.info().annotations.push({
-        type: "note",
-        description:
-          "WebKit offline navigation failed in automation; passed on Cache Storage evidence only",
-      });
-      await context.setOffline(false);
-      return;
     }
 
     await expect(page.getByRole("heading", { name: "你的書庫" })).toBeVisible({

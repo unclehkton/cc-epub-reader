@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RENDITION_OPTIONS,
   enforceNoArchiveReplacements,
+  installNoArchiveReplacementsGuard,
   purgeArchiveUrlCache,
   type AdaptedBook,
 } from "../../src/reader/epub-adapter";
@@ -40,7 +41,49 @@ describe("EPUB security configuration", () => {
     expect(adapter).not.toMatch(/replacements:\s*false/);
     expect(session).toMatch(/replacements:\s*"none"/);
     expect(adapter).toMatch(/enforceNoArchiveReplacements/);
+    expect(adapter).toMatch(/installNoArchiveReplacementsGuard/);
+    expect(session).toMatch(/installNoArchiveReplacementsGuard/);
     expect(session).toMatch(/enforceNoArchiveReplacements/);
+  });
+
+  it("installs the no-replacement guard before ready so CSS blobs cannot race", async () => {
+    let cssCalls = 0;
+    let replacementCalls = 0;
+    const book = {
+      settings: { replacements: "blobUrl" },
+      resources: {
+        settings: { replacements: "blobUrl" },
+        urls: ["OEBPS/style.css"],
+        replacementUrls: [],
+        replaceCss: async () => {
+          cssCalls += 1;
+          return ["blob:css"];
+        },
+        replacements: async () => {
+          replacementCalls += 1;
+          return ["blob:asset"];
+        },
+      },
+      replacements: async () => book,
+    } as unknown as AdaptedBook;
+
+    installNoArchiveReplacementsGuard(book);
+    const anyBook = book as unknown as {
+      settings: { replacements: string };
+      replacements: () => Promise<unknown>;
+      resources: {
+        settings: { replacements: string };
+        replaceCss: () => Promise<unknown>;
+        replacements: () => Promise<unknown>;
+      };
+    };
+    expect(anyBook.settings.replacements).toBe("none");
+    expect(anyBook.resources.settings.replacements).toBe("none");
+    await anyBook.replacements();
+    await anyBook.resources.replaceCss();
+    await anyBook.resources.replacements();
+    expect(cssCalls).toBe(0);
+    expect(replacementCalls).toBe(0);
   });
 
   it("purges revoked blob URLs from the archive urlCache", () => {

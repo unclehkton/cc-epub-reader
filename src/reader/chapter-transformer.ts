@@ -377,8 +377,9 @@ function stripMediaFetchAttributes(doc: Document): void {
 }
 
 /**
- * External http(s) hyperlinks require an explicit opener-safe exit: keep the
- * URL but force new-tab + rel=noopener noreferrer, and mark for app chrome.
+ * External http(s) and protocol-relative hyperlinks require an explicit
+ * opener-safe exit: force new-tab + rel=noopener noreferrer, mark for the
+ * parent click bridge (iframe sandbox lacks allow-popups).
  */
 function secureExternalLinks(doc: Document): void {
   for (const anchor of collectByLocalName(doc, new Set(["a"]))) {
@@ -386,12 +387,20 @@ function secureExternalLinks(doc: Document): void {
     if (!href) continue;
     const trimmed = href.trim();
     const lower = trimmed.toLowerCase();
-    if (lower.startsWith("http:") || lower.startsWith("https:")) {
-      anchor.setAttribute("target", "_blank");
-      anchor.setAttribute("rel", "noopener noreferrer");
-      // Prevent in-iframe navigation if the host ignores target.
-      anchor.setAttribute("data-epub-external", "1");
+    const isProtocolRelative = lower.startsWith("//");
+    const isHttp =
+      lower.startsWith("http:") ||
+      lower.startsWith("https:") ||
+      isProtocolRelative;
+    if (!isHttp) continue;
+    if (isProtocolRelative) {
+      // Normalize so parent open() never inherits a page protocol quirk.
+      anchor.setAttribute("href", `https:${trimmed}`);
     }
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noopener noreferrer");
+    // Parent-side bridge opens via window.open(..., "noopener,noreferrer").
+    anchor.setAttribute("data-epub-external", "1");
   }
 }
 
@@ -683,31 +692,34 @@ async function revealHtmlImage(
   }
 
   if (storedSrcset) {
-    // Re-validate each URL token in the stored srcset.
+    // Re-validate each URL token; only assign verified blob/data URLs.
     const safe = revalidateStoredSrcset(storedSrcset);
     if (safe) {
-      // Materialize package paths in srcset when needed.
-      if (materialize && !safe.includes("blob:")) {
-        const parts = safe.split(",");
-        const out: string[] = [];
-        for (const part of parts) {
-          const trimmed = part.trim();
-          const tokens = trimmed.split(/\s+/);
-          const url = tokens[0];
-          if (!url) continue;
-          let resolved = url;
-          if (!url.startsWith("blob:")) {
-            const m = await materialize(url);
-            if (m) resolved = m;
+      const parts = safe.split(",");
+      const out: string[] = [];
+      for (const part of parts) {
+        const trimmed = part.trim();
+        const tokens = trimmed.split(/\s+/);
+        const url = tokens[0];
+        if (!url) continue;
+        let resolved: string | null = null;
+        if (url.startsWith("blob:") || url.startsWith("data:")) {
+          resolved = url;
+        } else if (materialize) {
+          const m = await materialize(url);
+          if (m && (m.startsWith("blob:") || m.startsWith("data:"))) {
+            resolved = m;
           }
-          const descriptors = tokens.slice(1).join(" ");
-          out.push(descriptors ? `${resolved} ${descriptors}` : resolved);
         }
-        if (out.length > 0) {
-          img.setAttribute("srcset", out.join(", "));
-        }
+        // Fail closed: never leave package-relative or network paths in srcset.
+        if (!resolved) continue;
+        const descriptors = tokens.slice(1).join(" ");
+        out.push(descriptors ? `${resolved} ${descriptors}` : resolved);
+      }
+      if (out.length > 0) {
+        img.setAttribute("srcset", out.join(", "));
       } else {
-        img.setAttribute("srcset", safe);
+        img.removeAttribute("srcset");
       }
     }
   }

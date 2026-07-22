@@ -314,4 +314,36 @@ describe("transformChapter sanitizer", () => {
     expect("postRenderSanitize" in mod).toBe(false);
     expect("cleanupRenderedChapter" in mod).toBe(false);
   });
+
+  it("normalizes protocol-relative external links for parent open bridge", () => {
+    const doc = parseHtml(`<!DOCTYPE html><html><body>
+      <a href="//evil.example/out">proto</a>
+    </body></html>`);
+    transformChapter(doc, localResolver);
+    const a = doc.querySelector("a")!;
+    expect(a.getAttribute("href")).toBe("https://evil.example/out");
+    expect(a.getAttribute("data-epub-external")).toBe("1");
+    expect(a.getAttribute("rel")).toContain("noopener");
+  });
+
+  it("srcset reveal fails closed when materialize returns non-blob paths", async () => {
+    const doc = parseHtml(`<!DOCTYPE html><html><body>
+      <img src="images/a.png" srcset="images/a.png 1x, images/a@2x.png 2x" alt="a">
+    </body></html>`);
+    const resolver: ArchiveResolver = (raw) => {
+      const base = raw.split(/\s+/)[0]!;
+      if (base.startsWith("images/")) return base;
+      return null;
+    };
+    transformChapter(doc, resolver, {
+      materializeArchiveUrl: async () => "images/leaked.png",
+    });
+    const img = doc.querySelector("img")!;
+    const button = doc.querySelector("button")!;
+    button.click();
+    // Let async reveal settle.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(img.getAttribute("src")).toBeNull();
+    expect(img.getAttribute("srcset")).toBeNull();
+  });
 });
