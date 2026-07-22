@@ -24,12 +24,13 @@
   </ul>
 
   <h2>Verification</h2>
-  <p>Fresh release gate on 2026-07-22 (UTC+8): TypeScript pass; <strong>122/122</strong> unit tests; production/PWA build pass; shell <strong>61,365 bytes gzip</strong>; audit <strong>0 vulnerabilities</strong>; Playwright <strong>44/44</strong> in 4.5 minutes across Chromium, WebKit, Mobile Chrome, and Mobile Safari. See <a href="docs/code-review-CURRENT.md">code-review-CURRENT.md</a>.</p>
+  <p>Fresh release gate on 2026-07-22 (UTC+8): TypeScript pass; <strong>123/123</strong> unit tests; production/PWA build pass; shell <strong>61,365 bytes gzip</strong>; audit <strong>0 vulnerabilities</strong>; Playwright <strong>44/44</strong> in 4.5 minutes across Chromium, WebKit, Mobile Chrome, and Mobile Safari. See <a href="docs/code-review-CURRENT.md">code-review-CURRENT.md</a>.</p>
 
   <h2>2026-07-22 resize and iPhone sharing follow-up</h2>
   <ul>
     <li><strong>Window resize:</strong> resizing previously rebuilt the EPUB.js rendition through <code>setFlow()</code>. Several resize events could race destructive iframe rebuilds and leave the chapter blank. Resize is now coalesced by animation frame and delegates to EPUB.js <code>rendition.resize()</code>, preserving the active chapter, CFI, and iframe. Unit, component, and cross-breakpoint browser regressions cover this path.</li>
     <li><strong>iPhone share sheet:</strong> the manifest share target remains enabled for supporting browsers. Safari/WebKit does not implement the Web Share Target API, so a browser-only PWA cannot appear as “Books” in the iPhone share sheet. The current iPhone workflow is Save to Files, open Books, then tap <code>匯入 EPUB</code>. Direct iOS share-sheet integration requires a native app with a Share Extension and is deferred beyond release 0.1.</li>
+    <li><strong>Cloudflare analytics injection:</strong> the live canary detected a zone-level Cloudflare Insights script despite empty Pages analytics fields. Static responses now declare <code>Cache-Control: public, max-age=0, must-revalidate, no-transform</code>, preventing Cloudflare from mutating the privacy-first app HTML. A deployment-config regression requires the opt-out.</li>
   </ul>
 
   <h2>Still open</h2>

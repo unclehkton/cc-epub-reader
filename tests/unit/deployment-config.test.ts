@@ -31,6 +31,13 @@ describe("Cloudflare Pages deployment config", () => {
       expect(headers).toMatch(/Referrer-Policy:\s*no-referrer/i);
     });
 
+    it("prevents Cloudflare from injecting analytics into static responses", () => {
+      const cacheControl = headers.match(/Cache-Control:\s*(.+)/i)?.[1] ?? "";
+
+      expect(cacheControl).toMatch(/(?:^|,)\s*public\s*(?:,|$)/i);
+      expect(cacheControl).toMatch(/(?:^|,)\s*no-transform\s*(?:,|$)/i);
+    });
+
     it("ships a CSP that starts at default-src 'self' with narrow connect-src", () => {
       const csp = extractCsp(headers);
 
