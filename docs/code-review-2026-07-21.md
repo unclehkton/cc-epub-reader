@@ -249,3 +249,29 @@ The Windows Playwright process teardown remains fixed: despite the failing test,
 | `npm run test:e2e` | **32/32** (~2.6 min; chromium, webkit, Mobile Chrome, Mobile Safari) |
 
 Still out of scope for automated release evidence: physical iPhone Safari, live `books.pkwor.com` canary, full allowlist sanitizer rewrite, epubjs 0.4 major migration.
+
+## Critical self-review — remaining blockers (pass 4)
+
+**Honest assessment of prior “fixed” claims:** several pass-3 remediations were incomplete. The issues below were real defects in the then-current tree, not documentation lag.
+
+| Finding | Root cause | Pass-4 fix |
+| --- | --- | --- |
+| WebKit loses multi-book library on resume | 2s IDB open timeout → immediate `forceSessionOnly` → empty session store after reload | 8s × 3 durable retries; only then session-only; E2E asserts both books survive reload |
+| Late unowned blob after materialize timeout | `Promise.race` abandoned winner while `createUrl` still resolved into `urlCache` | Mark abandoned; late resolve revokes blob + purges cache |
+| Oversized reject leaves revoked URL in cache | `revokeObjectURL` without `purgeArchiveUrlCache` / key purge | Purge by value **and** path keys (`purgeArchiveUrlCacheKeys`) |
+| External links dead (cross-realm) | Parent `instanceof Element` false for iframe-realm `Event.target` | Duck-typed `nodeType === 1` + `closest` in parent bridge and chapter rebind |
+| ZIP bound after full allocate | `async("uint8array")` inflates entire entry first | JSZip `internalStream` counts bytes and aborts mid-inflate |
+| False-green resume / image / sandbox | Title regex / force-click / empty sandbox skip | `data-cfi` + `data-spine-href` on reader shell; require `blob:`/`data:` src; inject script probe must not run; both books visible after reload |
+| Docs contradictory / stale | Multiple verdicts all claiming current truth | `implementation-notes.html` rewritten: one authoritative status; history pointed at review log only |
+
+### Pass-4 gates (measured)
+
+| Gate | Result |
+| --- | --- |
+| `npm run check` | pass |
+| `npm run test:run` | **117** tests / 17 files |
+| `npm run build` / `check:bundle` | pass; shell **60,600** bytes gzip |
+| `npm run test:e2e` | **32/32** (~2.6 min; chromium, webkit, Mobile Chrome, Mobile Safari) |
+| `npm audit` | **0** vulnerabilities (xmldom override) |
+
+Out of scope unchanged: physical iPhone, live domain, allowlist sanitizer, epubjs 0.4.

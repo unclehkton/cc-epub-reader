@@ -6,7 +6,9 @@ import {
   DEFAULT_RENDITION_OPTIONS,
   enforceNoArchiveReplacements,
   installNoArchiveReplacementsGuard,
+  materializeArchiveUrl,
   purgeArchiveUrlCache,
+  purgeArchiveUrlCacheKeys,
   type AdaptedBook,
 } from "../../src/reader/epub-adapter";
 
@@ -98,6 +100,60 @@ describe("EPUB security configuration", () => {
     expect(cache["OEBPS/images/a.png"]).toBe("blob:keep-me");
     expect(cache["OEBPS/images/b.png"]).toBeUndefined();
   });
+
+  it("purges cache keys after oversized blob rejection", async () => {
+    const cache: Record<string, string> = {
+      "/OEBPS/images/big.png": "blob:oversized",
+    };
+    const book = {
+      archive: {
+        urlCache: cache,
+        createUrl: async () => "blob:oversized",
+      },
+    } as unknown as AdaptedBook;
+
+    // Simulate oversize rejection path: revoke + purge by value and key.
+    purgeArchiveUrlCache(book, ["blob:oversized"]);
+    purgeArchiveUrlCacheKeys(book, ["/OEBPS/images/big.png"]);
+    expect(cache["/OEBPS/images/big.png"]).toBeUndefined();
+  });
+
+  it("materializeArchiveUrl revokes late createUrl results after timeout", async () => {
+    const revoked: string[] = [];
+    const original = URL.revokeObjectURL;
+    URL.revokeObjectURL = (u: string) => {
+      revoked.push(u);
+    };
+    try {
+      let resolveCreate!: (url: string) => void;
+      const createDeferred = new Promise<string>((resolve) => {
+        resolveCreate = resolve;
+      });
+      const cache: Record<string, string> = {};
+      const book = {
+        archive: {
+          urlCache: cache,
+          createUrl: async (path: string) => {
+            const url = await createDeferred;
+            cache[path] = url;
+            return url;
+          },
+        },
+      } as unknown as AdaptedBook;
+
+      const pending = materializeArchiveUrl(book, "OEBPS/images/late.png");
+      // Let the 4s timeout fire.
+      await new Promise((r) => setTimeout(r, 4100));
+      const result = await pending;
+      expect(result).toBeNull();
+      // Late resolution must not leak an unowned blob.
+      resolveCreate("blob:late-orphan");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(revoked).toContain("blob:late-orphan");
+    } finally {
+      URL.revokeObjectURL = original;
+    }
+  }, 15_000);
 
   it("enforceNoArchiveReplacements clears eager blob maps and no-ops replacements()", async () => {
     const revoked: string[] = [];

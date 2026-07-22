@@ -43,8 +43,18 @@ test.describe("reader", () => {
     await closeReader(page);
 
     // Reload library and resume both books — progress should still be present.
+    // WebKit previously dropped the library when IDB probe timed into session-only.
     await page.reload();
-    await expect(page.getByRole("heading", { name: "你的書庫" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "你的書庫" })).toBeVisible({
+      timeout: 60_000,
+    });
+    // Both durable imports must survive reload (not session-only empty library).
+    await waitForBookTitle(page, "阅读夹具");
+    await waitForBookTitle(page, "长章节压力夹具");
+    await expect(page.getByRole("button", { name: "開啟 阅读夹具" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "開啟 长章节压力夹具" }),
+    ).toBeVisible();
 
     const firstProgressText = await page
       .locator(".book-row")
@@ -61,26 +71,35 @@ test.describe("reader", () => {
     // each has been opened at a different spine/page.
     expect(firstProgressText).not.toEqual(secondProgressText);
 
-    // Re-open first book and prove chapter resume (not only progress string).
+    // Re-open first book and prove CFI resume (not only progress string / title regex).
     await openBook(page, "阅读夹具");
     await expect(page.locator(".reader-chapter-title")).toContainText(/第二章|图片/, {
       timeout: 30_000,
     });
-    const firstResumeCfi = await page.evaluate(() => {
-      const host = document.querySelector("[aria-label^='閱讀']");
-      return host?.getAttribute("data-resume-cfi") || null;
+    const firstShell = page.locator("[aria-label^='閱讀']").first();
+    await expect(firstShell).toHaveAttribute("data-cfi", /epubcfi\s*\(/i, {
+      timeout: 30_000,
     });
-    // Progress bar / chapter title already prove resume; capture title as evidence.
+    const firstCfi = (await firstShell.getAttribute("data-cfi")) || "";
+    const firstSpine = (await firstShell.getAttribute("data-spine-href")) || "";
+    expect(firstCfi.length).toBeGreaterThan(8);
+    expect(firstSpine.length).toBeGreaterThan(0);
     const firstChapterTitle = await page.locator(".reader-chapter-title").innerText();
     await closeReader(page);
 
-    // Re-open second book — distinct resume location from the first.
+    // Re-open second book — distinct restored CFI / spine from the first.
     await openBook(page, "长章节压力夹具");
     await expect(page.getByLabel(/閱讀：/)).toBeVisible();
+    const secondShell = page.locator("[aria-label^='閱讀']").first();
+    await expect(secondShell).toHaveAttribute("data-cfi", /epubcfi\s*\(/i, {
+      timeout: 30_000,
+    });
+    const secondCfi = (await secondShell.getAttribute("data-cfi")) || "";
+    const secondSpine = (await secondShell.getAttribute("data-spine-href")) || "";
     const secondChapterTitle = await page.locator(".reader-chapter-title").innerText();
-    // Distinct restored chapter context for the two books.
     expect(secondChapterTitle).not.toEqual(firstChapterTitle);
-    void firstResumeCfi;
+    // At least one of CFI or spine must differ across the two retained books.
+    expect(secondCfi === firstCfi && secondSpine === firstSpine).toBe(false);
     await closeReader(page);
 
     // Re-open first book and exercise flow switch + conversion + image gate.
@@ -106,34 +125,23 @@ test.describe("reader", () => {
     await page.waitForTimeout(800);
     await clickImageGate(page);
 
-    // After reveal, a restored img[src] should exist inside a content frame.
+    // After reveal, require a live blob:/data: object URL — not merely a gate hide
+    // or residual data-epub-src (those can pass without a successful materialize).
     let revealed = false;
     const revealDeadline = Date.now() + 15_000;
     while (!revealed && Date.now() < revealDeadline) {
       for (const frame of contentFrames(page)) {
         try {
           const srcs = await frame.locator("img").evaluateAll((imgs) =>
-            imgs.map((img) => ({
-              src: img.getAttribute("src"),
-              data: img.getAttribute("data-epub-src"),
-            })),
+            imgs.map((img) => img.getAttribute("src")),
           );
           if (
             srcs.some(
-              (row) =>
-                typeof row.src === "string" &&
-                row.src.length > 0 &&
-                !row.src.startsWith("https:"),
+              (src) =>
+                typeof src === "string" &&
+                (src.startsWith("blob:") || src.startsWith("data:")),
             )
           ) {
-            revealed = true;
-            break;
-          }
-          // Gate may hide after load; data-epub-src alone means local archive image exists.
-          const hiddenGate = await frame
-            .locator('button[hidden], button[aria-hidden="true"]')
-            .count();
-          if (hiddenGate > 0 && srcs.some((row) => row.data)) {
             revealed = true;
             break;
           }
@@ -191,8 +199,15 @@ test.describe("reader", () => {
     let sawCsp = false;
     for (const frame of contentFrames(page)) {
       try {
-        const content = await frame.locator('meta[http-equiv="Content-Security-Policy" i]').first().getAttribute("content", { timeout: 1000 });
-        if (content && content.includes("script-src") && content.includes("none")) {
+        const content = await frame
+          .locator('meta[http-equiv="Content-Security-Policy" i]')
+          .first()
+          .getAttribute("content", { timeout: 1000 });
+        if (
+          content &&
+          content.includes("script-src") &&
+          content.includes("'none'")
+        ) {
           sawCsp = true;
           break;
         }
@@ -202,11 +217,36 @@ test.describe("reader", () => {
     }
     expect(sawCsp).toBe(true);
 
-    // Iframe sandbox must not grant allow-scripts for chapter content.
-    const sandboxAttrs = await page.locator(".reader-stage iframe, iframe").evaluateAll((frames) =>
-      frames.map((f) => (f as HTMLIFrameElement).getAttribute("sandbox") || ""),
-    );
-    // When EPUB.js sets a sandbox, it must not include allow-scripts.
+    // Script execution must remain blocked even if an attacker injects a script tag.
+    let scriptBlocked = false;
+    for (const frame of contentFrames(page)) {
+      try {
+        scriptBlocked = await frame.evaluate(() => {
+          const marker = `epub-script-probe-${Math.random().toString(16).slice(2)}`;
+          (window as unknown as { __epubProbe?: string }).__epubProbe = undefined;
+          const s = document.createElement("script");
+          s.textContent = `window.__epubProbe=${JSON.stringify(marker)}`;
+          document.documentElement.appendChild(s);
+          const ran =
+            (window as unknown as { __epubProbe?: string }).__epubProbe === marker;
+          s.remove();
+          return !ran;
+        });
+        if (scriptBlocked) break;
+      } catch {
+        // cross-origin or detached frame
+      }
+    }
+    expect(scriptBlocked).toBe(true);
+
+    // Iframe sandbox: if present, must not grant allow-scripts. EPUB.js may omit
+    // sandbox; CSP + allowScriptedContent:false remain the primary controls.
+    const sandboxAttrs = await page
+      .locator(".reader-stage iframe, iframe")
+      .evaluateAll((frames) =>
+        frames.map((f) => (f as HTMLIFrameElement).getAttribute("sandbox") || ""),
+      );
+    expect(sandboxAttrs.length).toBeGreaterThan(0);
     for (const sandbox of sandboxAttrs) {
       if (!sandbox) continue;
       expect(sandbox.split(/\s+/)).not.toContain("allow-scripts");

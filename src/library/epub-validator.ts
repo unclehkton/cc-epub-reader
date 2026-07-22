@@ -73,29 +73,109 @@ function assertEntrySize(entry: unknown, maxBytes: number): void {
   }
 }
 
+type ZipStreamLike = {
+  on: (event: string, cb: (...args: unknown[]) => void) => ZipStreamLike;
+  resume?: () => void;
+  pause?: () => void;
+};
+
+type ZipStreamEntry = {
+  async?: (type: "uint8array") => Promise<Uint8Array>;
+  internalStream?: (type: string) => ZipStreamLike;
+};
+
 /**
- * Decompress a text entry with a hard post-expand ceiling. Declared central-
- * directory sizes can be forged; measuring the actual output is required.
+ * Decompress entry bytes with a hard ceiling enforced *while* streaming.
+ * Declared central-directory sizes can be forged; `async("uint8array")` would
+ * fully allocate first. Prefer JSZip `internalStream` and abort mid-inflate.
  */
-async function readZipTextBounded(
-  entry: { async: (type: "uint8array") => Promise<Uint8Array> },
+async function readZipBytesBounded(
+  entry: ZipStreamEntry,
   maxBytes: number,
-): Promise<string> {
+): Promise<Uint8Array> {
   assertEntrySize(entry, maxBytes);
-  // Prefer uint8array so byte length is exact (not UTF-16 code units).
-  const bytes = await entry.async("uint8array");
+
+  if (typeof entry.internalStream === "function") {
+    return new Promise<Uint8Array>((resolve, reject) => {
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      let settled = false;
+      const failOnce = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      try {
+        const stream = entry.internalStream!("uint8array");
+        stream.on("data", (data: unknown) => {
+          if (settled) return;
+          const chunk =
+            data instanceof Uint8Array
+              ? data
+              : data instanceof ArrayBuffer
+                ? new Uint8Array(data)
+                : null;
+          if (!chunk) return;
+          total += chunk.byteLength;
+          if (total > maxBytes) {
+            try {
+              stream.pause?.();
+            } catch {
+              // ignore
+            }
+            failOnce(new ImportError("too-large", safeMessage("too-large")));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        stream.on("error", (err: unknown) => {
+          failOnce(err ?? new Error("zip stream error"));
+        });
+        stream.on("end", () => {
+          if (settled) return;
+          settled = true;
+          if (total > maxBytes) {
+            reject(new ImportError("too-large", safeMessage("too-large")));
+            return;
+          }
+          const out = new Uint8Array(total);
+          let offset = 0;
+          for (const c of chunks) {
+            out.set(c, offset);
+            offset += c.byteLength;
+          }
+          resolve(out);
+        });
+        stream.resume?.();
+      } catch (error) {
+        failOnce(error);
+      }
+    });
+  }
+
+  // Fallback when internalStream is unavailable (still post-check length).
+  if (typeof entry.async !== "function") {
+    fail("invalid-zip");
+  }
+  const bytes = await entry.async!("uint8array");
   if (bytes.byteLength > maxBytes) {
     fail("too-large");
   }
-  // Decode as text for XML parsing callers.
+  return bytes;
+}
+
+async function readZipTextBounded(
+  entry: ZipStreamEntry,
+  maxBytes: number,
+): Promise<string> {
+  const bytes = await readZipBytesBounded(entry, maxBytes);
   if (typeof TextDecoder !== "undefined") {
     return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   }
-  // Fallback for rare environments without TextDecoder.
   let out = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    out += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    out += String.fromCharCode(...Array.from(bytes.subarray(i, i + step)));
   }
   return out;
 }

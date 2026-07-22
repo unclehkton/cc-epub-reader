@@ -33,6 +33,16 @@ export interface TransformOptions {
   materializeArchiveUrl?: MaterializeArchiveUrl;
 }
 
+/** Cross-realm safe Element cast (iframe nodes fail parent `instanceof`). */
+function asElement(value: EventTarget | null | undefined): Element | null {
+  if (!value || typeof value !== "object") return null;
+  const node = value as Node;
+  if (node.nodeType !== 1) return null;
+  const el = value as Element;
+  if (typeof el.closest !== "function") return null;
+  return el;
+}
+
 /** Local names removed case-insensitively (HTML + XHTML). */
 const REMOVE_LOCAL_NAMES = new Set([
   "script",
@@ -166,8 +176,9 @@ export function rebindImageGates(
   // covers WebKit where direct button listeners may not fire from automation.
   const onDocClick = (event: Event): void => {
     if (isDisposed()) return;
-    const target = event.target;
-    if (!target || !(target instanceof Element)) return;
+    // Cross-realm: do not use parent-realm `instanceof Element`.
+    const target = asElement(event.target);
+    if (!target) return;
     const button = target.closest("button");
     if (!button || !isGateButton(button)) return;
 

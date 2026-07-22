@@ -414,44 +414,94 @@ export async function materializeArchiveUrl(
 
   if (create) {
     for (const candidate of candidates) {
+      // If createUrl resolves after our timeout, we must still revoke/purge the
+      // late blob so it is not orphaned in archive.urlCache.
+      let abandoned = false;
+      const pending = Promise.resolve()
+        .then(() => create(candidate))
+        .then((url) => {
+          if (!abandoned) return url;
+          if (typeof url === "string" && url.startsWith("blob:")) {
+            revokeBlobLike(url);
+            purgeArchiveUrlCache(book, [url]);
+            purgeArchiveUrlCacheKeys(book, [candidate, path]);
+          }
+          return null;
+        })
+        .catch(() => null);
+
       try {
-        const url = await Promise.race([
-          create(candidate),
-          new Promise<string>((_, reject) => {
-            setTimeout(() => reject(new Error("createUrl timeout")), 4000);
+        const raced = await Promise.race([
+          pending.then((url) => ({ kind: "ok" as const, url })),
+          new Promise<{ kind: "timeout" }>((resolve) => {
+            setTimeout(() => {
+              abandoned = true;
+              resolve({ kind: "timeout" });
+            }, 4000);
           }),
         ]);
-        if (typeof url === "string" && url.trim()) {
-          const out = url.trim();
-          // Fail closed: only accept verified blob/data object URLs.
-          if (!out.startsWith("blob:") && !out.startsWith("data:")) {
-            continue;
-          }
-          // Bound materialised image size (defence against forged ZIP entries).
-          if (out.startsWith("blob:") && typeof fetch === "function") {
-            try {
-              const head = await fetch(out);
-              const blob = await head.blob();
-              if (blob.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
-                revokeBlobLike(out);
-                continue;
-              }
-            } catch {
-              // If we cannot size-check, still return the blob — CSP limits network.
-            }
-          }
-          if (ownedObjectUrls && out.startsWith("blob:")) {
-            ownedObjectUrls.add(out);
-          }
-          return out;
+        if (raced.kind === "timeout") {
+          continue;
         }
+        const raw = raced.url;
+        if (typeof raw !== "string" || !raw.trim()) {
+          continue;
+        }
+        const out = raw.trim();
+        // Fail closed: only accept verified blob/data object URLs.
+        if (!out.startsWith("blob:") && !out.startsWith("data:")) {
+          continue;
+        }
+        // Bound materialised image size (defence against forged ZIP entries).
+        if (out.startsWith("blob:") && typeof fetch === "function") {
+          try {
+            const head = await fetch(out);
+            const blob = await head.blob();
+            if (blob.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+              revokeBlobLike(out);
+              purgeArchiveUrlCache(book, [out]);
+              purgeArchiveUrlCacheKeys(book, [candidate, path]);
+              continue;
+            }
+          } catch {
+            // If we cannot size-check, still return the blob — CSP limits network.
+          }
+        }
+        if (ownedObjectUrls && out.startsWith("blob:")) {
+          ownedObjectUrls.add(out);
+        }
+        return out;
       } catch {
+        abandoned = true;
         // try next candidate
       }
     }
   }
 
   return null;
+}
+
+/** Remove urlCache entries by path key (not only by blob value). */
+export function purgeArchiveUrlCacheKeys(
+  book: AdaptedBook,
+  keys: Iterable<string>,
+): void {
+  const cache = book.archive?.urlCache;
+  if (!cache || typeof cache !== "object") return;
+  for (const key of keys) {
+    if (key in cache) {
+      const value = cache[key];
+      if (typeof value === "string") revokeBlobLike(value);
+      delete cache[key];
+    }
+    // epubjs sometimes stores with/without leading slash.
+    const alt = key.startsWith("/") ? key.slice(1) : `/${key}`;
+    if (alt in cache) {
+      const value = cache[alt];
+      if (typeof value === "string") revokeBlobLike(value);
+      delete cache[alt];
+    }
+  }
 }
 
 /**

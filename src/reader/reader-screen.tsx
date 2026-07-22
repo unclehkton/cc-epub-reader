@@ -435,6 +435,13 @@ export function ReaderScreen({
         .filter(Boolean)
         .join(" ")}
       aria-label={`閱讀：${title}`}
+      data-spine-href={location?.spineHref ?? ""}
+      data-cfi={location?.cfi ?? ""}
+      data-spine-index={
+        location && Number.isFinite(location.spineIndex)
+          ? String(location.spineIndex)
+          : ""
+      }
     >
       <header
         class={[

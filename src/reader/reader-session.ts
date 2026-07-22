@@ -115,6 +115,29 @@ export function createReaderSession(
   return new ReaderSessionImpl(options);
 }
 
+/**
+ * Cross-realm safe Element check. Parent-realm `instanceof Element` is false
+ * for nodes that live in an iframe document (different global).
+ */
+function eventTargetElement(target: EventTarget | null): Element | null {
+  if (!target || typeof target !== "object") return null;
+  const node = target as Node;
+  if (node.nodeType !== 1) return null;
+  const el = target as Element;
+  if (typeof el.closest !== "function" || typeof el.getAttribute !== "function") {
+    return null;
+  }
+  return el;
+}
+
+function closestElement(from: Element, selector: string): Element | null {
+  try {
+    return from.closest(selector);
+  } catch {
+    return null;
+  }
+}
+
 class ReaderSessionImpl implements ReaderSession {
   private readonly element: HTMLElement;
   private readonly injectedFactory: EpubFactory | undefined;
@@ -520,9 +543,10 @@ class ReaderSessionImpl implements ReaderSession {
   private installExternalLinkBridge(doc: Document): void {
     this.clearExternalLinkBridge();
     const onClick = (event: Event): void => {
-      const target = event.target;
-      if (!target || !(target instanceof Element)) return;
-      const anchor = target.closest("a[data-epub-external='1']");
+      // Cross-realm: iframe EventTarget is not `instanceof` parent Element.
+      const target = eventTargetElement(event.target);
+      if (!target) return;
+      const anchor = closestElement(target, "a[data-epub-external='1']");
       if (!anchor) return;
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) return;

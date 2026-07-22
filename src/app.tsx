@@ -385,28 +385,52 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        // Probe durable storage with a short timeout so UI is never stuck loading.
-        const db = await Promise.race([
-          openDatabase(),
-          new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error("IndexedDB open timed out")), 2000);
-          }),
-        ]);
-        db.close();
-        await repository.listBooks();
-        if (!cancelled) {
-          setSessionOnly(repository.isSessionOnly);
-          setIdbReady(true);
-        }
-      } catch {
-        if (!cancelled) {
-          repository.forceSessionOnly(
-            "無法開啟本機書庫（可能是私密模式或儲存空間不足）。目前為工作階段模式：書籍與進度不會在重新載入後保留。",
-          );
-          setIdbReady(true);
+      // WebKit (especially under Playwright) can open IDB slowly after reload.
+      // A single short timeout previously forced session-only and made imported
+      // books appear to vanish. Retry durable open before giving up.
+      const OPEN_TIMEOUT_MS = 8_000;
+      const MAX_ATTEMPTS = 3;
+      let lastError: unknown;
+
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+        if (cancelled) return;
+        try {
+          const db = await Promise.race([
+            openDatabase(),
+            new Promise<never>((_, reject) => {
+              setTimeout(
+                () => reject(new Error("IndexedDB open timed out")),
+                OPEN_TIMEOUT_MS,
+              );
+            }),
+          ]);
+          db.close();
+          // Prove list works on durable store before marking ready.
+          await repository.listBooks();
+          if (!cancelled) {
+            setSessionOnly(repository.isSessionOnly);
+            setIdbReady(true);
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          // Hard private-mode / disabled IDB failures should not retry forever.
+          if (isStorageFailure(error) && !/timed out/i.test(String(
+            error instanceof Error ? error.message : error,
+          ))) {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
         }
       }
+
+      if (cancelled) return;
+      // Only after retries fail: session-only (empty until re-import this tab).
+      void lastError;
+      repository.forceSessionOnly(
+        "無法開啟本機書庫（可能是私密模式或儲存空間不足）。目前為工作階段模式：書籍與進度不會在重新載入後保留。",
+      );
+      setIdbReady(true);
     })();
     return () => {
       cancelled = true;
