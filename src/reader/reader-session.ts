@@ -555,51 +555,90 @@ class ReaderSessionImpl implements ReaderSession {
     }
   }
 
+  /**
+   * True when an iframe-local rect is large enough and intersects the iframe
+   * viewport. Used so we never park ghost "點擊顯示圖片" controls at a fixed
+   * stage corner when the image is off-page, unloaded, or 0×0.
+   */
+  private isIframeLocalRectVisible(
+    rect: DOMRect,
+    iframe: HTMLIFrameElement,
+  ): boolean {
+    const vw = iframe.clientWidth || iframe.getBoundingClientRect().width;
+    const vh = iframe.clientHeight || iframe.getBoundingClientRect().height;
+    if (rect.width < 4 || rect.height < 4) return false;
+    // Ignore 1×1 / spacer tracking pixels even if attributes inflate layout.
+    if (rect.width <= 2 && rect.height <= 2) return false;
+    if (rect.width < 8 && rect.height < 8) return false;
+    // Intersect the iframe's client viewport (rect is iframe-local).
+    if (rect.bottom <= 0 || rect.right <= 0) return false;
+    if (rect.top >= vh || rect.left >= vw) return false;
+    return true;
+  }
+
+  private hideParentOverlayButton(button: HTMLButtonElement): void {
+    button.style.visibility = "hidden";
+    button.style.pointerEvents = "none";
+  }
+
+  private showParentOverlayButton(
+    button: HTMLButtonElement,
+    left: number,
+    top: number,
+  ): void {
+    button.style.left = `${Math.max(0, left)}px`;
+    button.style.top = `${Math.max(0, top)}px`;
+    button.style.visibility = "visible";
+    button.style.pointerEvents = "auto";
+  }
+
   /** Reposition all parent overlays (image gates + external links). */
   private repositionParentOverlays(): void {
     if (typeof document === "undefined") return;
     const iframe = this.element.querySelector("iframe");
     if (!iframe) return;
     const iframeRect = iframe.getBoundingClientRect();
-    const stage = this.element.getBoundingClientRect();
 
     for (const pair of this.parentGatePairs) {
       try {
-        const rect = pair.img.getBoundingClientRect();
-        const left = iframeRect.left + rect.left;
-        const top = iframeRect.top + rect.top;
-        if (rect.width > 2 && rect.height > 2) {
-          pair.button.style.left = `${Math.max(0, left)}px`;
-          pair.button.style.top = `${Math.max(0, top - 48)}px`;
-          pair.button.style.visibility = "visible";
-        } else {
-          pair.button.style.left = `${Math.max(8, stage.left + 8)}px`;
-          pair.button.style.top = `${Math.max(8, stage.top + 56)}px`;
-          pair.button.style.visibility = "visible";
+        // Already revealed — remove ghost control.
+        const liveSrc = pair.img.getAttribute("src") || "";
+        if (liveSrc.startsWith("blob:") || liveSrc.startsWith("data:")) {
+          this.hideParentOverlayButton(pair.button);
+          pair.button.hidden = true;
+          continue;
         }
+        const rect = pair.img.getBoundingClientRect();
+        if (!this.isIframeLocalRectVisible(rect, iframe)) {
+          // Do NOT park at stage corner — that produced a floating gate on
+          // every section when images were off-page or not laid out yet.
+          this.hideParentOverlayButton(pair.button);
+          continue;
+        }
+        const left = iframeRect.left + rect.left;
+        const top = iframeRect.top + rect.top - 48;
+        pair.button.hidden = false;
+        this.showParentOverlayButton(pair.button, left, top);
       } catch {
-        // ignore
+        this.hideParentOverlayButton(pair.button);
       }
     }
 
     for (const pair of this.parentExternalLinks) {
       try {
         const rect = pair.anchor.getBoundingClientRect();
+        if (!this.isIframeLocalRectVisible(rect, iframe)) {
+          this.hideParentOverlayButton(pair.button);
+          continue;
+        }
         const left = iframeRect.left + rect.left;
         const top = iframeRect.top + rect.top;
-        if (rect.width > 2 && rect.height > 2) {
-          pair.button.style.left = `${Math.max(0, left)}px`;
-          pair.button.style.top = `${Math.max(0, top)}px`;
-          pair.button.style.width = `${Math.max(44, rect.width)}px`;
-          pair.button.style.height = `${Math.max(44, rect.height)}px`;
-          pair.button.style.visibility = "visible";
-        } else {
-          pair.button.style.left = `${Math.max(8, stage.left + 8)}px`;
-          pair.button.style.top = `${Math.max(8, stage.top + 100)}px`;
-          pair.button.style.visibility = "visible";
-        }
+        pair.button.style.width = `${Math.max(44, rect.width)}px`;
+        pair.button.style.height = `${Math.max(44, rect.height)}px`;
+        pair.button.hidden = false;
+        this.showParentOverlayButton(pair.button, left, top);
       } catch {
-        // ignore
+        this.hideParentOverlayButton(pair.button);
       }
     }
   }
@@ -775,10 +814,11 @@ class ReaderSessionImpl implements ReaderSession {
       }
       const inFrameButton = prev as HTMLElement;
       candidates.push({ img, inFrameButton });
-      // Prefer parent control for activation; keep label for a11y in content.
+      // Prefer parent control for activation. Hide the in-chapter control so we
+      // do not stack two "點擊顯示圖片" labels (parent + ghost/in-frame).
       inFrameButton.setAttribute("aria-hidden", "true");
+      inFrameButton.hidden = true;
       inFrameButton.style.pointerEvents = "none";
-      inFrameButton.style.opacity = "0.35";
     }
 
     if (candidates.length === 0) {
