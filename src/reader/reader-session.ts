@@ -23,6 +23,7 @@ import {
   DEFAULT_RENDITION_OPTIONS,
   loadEpubFactory,
   enforceNoArchiveReplacements,
+  disposeMaterializedUrl,
   installNoArchiveReplacementsGuard,
   materializeArchiveUrl,
   purgeArchiveUrlCache,
@@ -157,6 +158,12 @@ class ReaderSessionImpl implements ReaderSession {
   private readonly ownedObjectUrls = new Set<string>();
   /** Blob URLs created for the active chapter's revealed images only. */
   private readonly chapterObjectUrls = new Set<string>();
+  /** One EPUB extraction per package path while the active chapter is visible. */
+  private readonly chapterMaterializations = new Map<
+    string,
+    Promise<string | null>
+  >();
+  private chapterMaterializationGeneration = 0;
   /**
    * Parent-document gate overlays paired with in-iframe images.
    * Kept as one array so reveal cannot desync button indices from image pairs.
@@ -835,14 +842,40 @@ class ReaderSessionImpl implements ReaderSession {
     | undefined {
     const book = this.book;
     if (!book) return undefined;
-    const chapterUrls = this.chapterObjectUrls;
-    const owned = this.ownedObjectUrls;
-    return async (packagePath: string) => {
-      const url = await materializeArchiveUrl(book, packagePath, chapterUrls);
-      if (url?.startsWith("blob:")) {
-        owned.add(url);
-      }
-      return url;
+    return (packagePath: string) => {
+      const key = packagePath.trim();
+      if (!key) return Promise.resolve(null);
+
+      const existing = this.chapterMaterializations.get(key);
+      if (existing) return existing;
+
+      const generation = this.chapterMaterializationGeneration;
+      let pending!: Promise<string | null>;
+      pending = materializeArchiveUrl(book, key, this.chapterObjectUrls)
+        .then((url) => {
+          const stale =
+            this.destroyed ||
+            this.book !== book ||
+            this.chapterMaterializationGeneration !== generation;
+          if (stale) {
+            if (url?.startsWith("blob:")) {
+              this.chapterObjectUrls.delete(url);
+              disposeMaterializedUrl(book, url, [key]);
+            }
+            return null;
+          }
+          if (url?.startsWith("blob:")) {
+            this.ownedObjectUrls.add(url);
+          }
+          return url;
+        })
+        .finally(() => {
+          if (this.chapterMaterializations.get(key) === pending) {
+            this.chapterMaterializations.delete(key);
+          }
+        });
+      this.chapterMaterializations.set(key, pending);
+      return pending;
     };
   }
 
@@ -926,18 +959,9 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.revokeChapterObjectUrls();
       const resolve = createArchiveResolver(book);
+      const materialize = this.makeMaterialize();
       this.transformResult = transformChapter(document, resolve, {
-        materializeArchiveUrl: async (packagePath) => {
-          const url = await materializeArchiveUrl(
-            book,
-            packagePath,
-            this.chapterObjectUrls,
-          );
-          if (url?.startsWith("blob:")) {
-            this.ownedObjectUrls.add(url);
-          }
-          return url;
-        },
+        materializeArchiveUrl: materialize,
       });
     };
     this.spineContentHook = hook;
@@ -960,6 +984,8 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   private revokeChapterObjectUrls(): void {
+    this.chapterMaterializationGeneration += 1;
+    this.chapterMaterializations.clear();
     const revoke = getRevokeObjectURL();
     const revoked: string[] = [];
     for (const url of this.chapterObjectUrls) {

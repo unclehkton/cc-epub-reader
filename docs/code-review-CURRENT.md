@@ -39,13 +39,14 @@ Branch `experiment/epubjs-0.4` / note `docs/experiments/epubjs-0.4-r6.md` (on th
 | C4 | Image reveal decode | E2E requires `naturalWidth > 0` on blob/data src |
 | C5 | Durable library after hard reload + re-nav | E2E multi-book stress |
 | C6 | Docs single source of truth | This file + rewritten `implementation-notes.html` |
+| C7 | Duplicate image extraction on rapid taps | Unit clicks one gate twice and requires one EPUB `createUrl` call; chapter-scoped promise map rejects stale results |
 
 ## Gates (measured after residual-list pass)
 
 | Gate | Result |
 | --- | --- |
 | `npm run check` | pass |
-| `npm run test:run` | **119** tests |
-| `npm run build` / `check:bundle` | pass; shell **61,123** gzip |
+| `npm run test:run` | **120** tests |
+| `npm run build` / `check:bundle` | pass; shell **61,217** gzip |
 | `npm audit` | **0** (xmldom override) |
-| `npm run test:e2e` | **40/40** (~3.7 min; all 4 projects) |
+| `npm run test:e2e` | **40/40** (3.9 min; all 4 projects) |

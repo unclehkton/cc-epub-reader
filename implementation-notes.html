@@ -17,14 +17,14 @@
   <ul>
     <li><code>allowScriptedContent: false</code> + chapter CSP <code>script-src 'none'</code> + parent image gates.</li>
     <li><code>replacements: "none"</code> + pre-<code>ready</code> no-replacement guard (blocks archive-wide CSS blob maps).</li>
-    <li>Image materialize: fail-closed blob/data; late <code>createUrl</code> disposed; size-check fail-closed; cache purged by value and path keys.</li>
+    <li>Image materialize: fail-closed blob/data; one chapter-scoped in-flight promise per package path prevents duplicate extraction on rapid taps; late/stale <code>createUrl</code> results are disposed; size-check fail-closed; cache purged by value and path keys.</li>
     <li>External links: cross-realm-safe click bridge → parent <code>window.open(..., "noopener,noreferrer")</code>.</li>
     <li>Durable IDB probe retries before session-only; share expiry uses <code>byReceivedAt</code> key cursor (IDB v3).</li>
     <li>ZIP: declared ceilings + <code>internalStream</code> consumer abort (worker may still inflate — residual R1).</li>
   </ul>
 
   <h2>Verification</h2>
-  <p>Record results in <a href="docs/code-review-CURRENT.md">code-review-CURRENT.md</a> gates table after each full run. Do not paste contradictory historical “all fixed” tables here.</p>
+  <p>Fresh release gate on 2026-07-22 (UTC+8): TypeScript pass; <strong>120/120</strong> unit tests; production/PWA build pass; shell <strong>61,217 bytes gzip</strong>; audit <strong>0 vulnerabilities</strong>; Playwright <strong>40/40</strong> in 3.9 minutes across Chromium, WebKit, Mobile Chrome, and Mobile Safari. See <a href="docs/code-review-CURRENT.md">code-review-CURRENT.md</a>.</p>
 
   <h2>Still open</h2>
   <ol>

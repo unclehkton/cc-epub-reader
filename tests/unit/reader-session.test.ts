@@ -68,6 +68,8 @@ interface FakeControl {
   listeners: Map<string, Set<(...args: unknown[]) => void>>;
   location: AdaptedLocation | null;
   sections: AdaptedSection[];
+  imageCreateCalls: string[];
+  imageUrl: Deferred<string>;
   emit(event: string, payload?: unknown): void;
   setLocation(partial: Partial<AdaptedLocation["start"]> & { cfi: string }): void;
 }
@@ -178,6 +180,13 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         urls: ["images/a.png"],
         replacementUrls: ["blob:fake-archive/images/a.png"],
       },
+      archive: {
+        urlCache: {},
+        createUrl(path: string) {
+          control.imageCreateCalls.push(path);
+          return control.imageUrl.promise;
+        },
+      },
       renderTo() {
         return rendition;
       },
@@ -222,6 +231,8 @@ function createControl(): FakeControl {
       { href: "ch1.xhtml", index: 0 },
       { href: "ch2.xhtml", index: 1 },
     ],
+    imageCreateCalls: [],
+    imageUrl: deferred<string>(),
     emit(event, payload) {
       const set = control.listeners.get(event);
       if (!set) return;
@@ -409,6 +420,31 @@ describe("ReaderSession generation ownership", () => {
     // Package path is stored; blob materialization happens only on reveal.
     expect(local?.getAttribute("data-epub-src")).toBe("images/a.png");
 
+    session.destroy();
+  });
+
+  it("single-flights concurrent reveals of the same chapter image", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+
+    const doc = new DOMParser().parseFromString(
+      `<html><body><img src="images/a.png" alt="x"></body></html>`,
+      "text/html",
+    );
+    await control.contentHooks.trigger!(doc);
+    const gate = doc.querySelector("button");
+    expect(gate).not.toBeNull();
+
+    gate!.click();
+    gate!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(control.imageCreateCalls).toHaveLength(1);
+
+    control.imageUrl.resolve("data:image/png;base64,iVBORw0KGgo=");
+    await Promise.resolve();
     session.destroy();
   });
 
