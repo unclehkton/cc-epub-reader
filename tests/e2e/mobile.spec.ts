@@ -14,8 +14,8 @@ test.describe("mobile", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await gotoLibrary(page);
     await importEpub(page, FIXTURE_READER);
-    await waitForBookTitle(page, "阅读夹具");
-    await openBook(page, "阅读夹具");
+    await waitForBookTitle(page, "閱讀夾具");
+    await openBook(page, "閱讀夾具");
 
     const reader = page.getByLabel(/閱讀：/);
     await expect(reader).toBeVisible();

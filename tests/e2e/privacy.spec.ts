@@ -42,8 +42,8 @@ test.describe("privacy", () => {
 
     await gotoLibrary(page);
     await importEpub(page, FIXTURE_READER);
-    await waitForBookTitle(page, "阅读夹具");
-    await openBook(page, "阅读夹具");
+    await waitForBookTitle(page, "閱讀夾具");
+    await openBook(page, "閱讀夾具");
 
     // Visit the chapter that embeds a remote https image — it must never load.
     await selectTocEntry(page, /第二章/);
@@ -92,8 +92,8 @@ test.describe("privacy", () => {
 
     await gotoLibrary(page);
     await importEpub(page, FIXTURE_READER);
-    await waitForBookTitle(page, "阅读夹具");
-    await openBook(page, "阅读夹具");
+    await waitForBookTitle(page, "閱讀夾具");
+    await openBook(page, "閱讀夾具");
     await page.waitForTimeout(1000);
 
     expect(epubPosts, `EPUB POST reached server: ${epubPosts.join(", ")}`).toEqual(

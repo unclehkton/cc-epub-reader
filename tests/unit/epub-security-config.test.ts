@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { MAX_ENTRY_UNCOMPRESSED_BYTES } from "../../src/library/epub-validator";
 import {
   DEFAULT_RENDITION_OPTIONS,
   enforceNoArchiveReplacements,
@@ -154,6 +155,69 @@ describe("EPUB security configuration", () => {
       URL.revokeObjectURL = original;
     }
   }, 15_000);
+
+  it("materializeArchiveUrl fails closed when size-check fetch throws", async () => {
+    const revoked: string[] = [];
+    const originalRevoke = URL.revokeObjectURL;
+    const originalFetch = globalThis.fetch;
+    URL.revokeObjectURL = (u: string) => {
+      revoked.push(u);
+    };
+    globalThis.fetch = (async () => {
+      throw new Error("size-check unavailable");
+    }) as typeof fetch;
+    try {
+      const cache: Record<string, string> = {};
+      const book = {
+        archive: {
+          urlCache: cache,
+          createUrl: async (path: string) => {
+            const url = `blob:size-fail-${path}`;
+            cache[path] = url;
+            return url;
+          },
+        },
+      } as unknown as AdaptedBook;
+
+      const result = await materializeArchiveUrl(book, "OEBPS/images/a.png");
+      expect(result).toBeNull();
+      expect(revoked.length).toBeGreaterThan(0);
+    } finally {
+      URL.revokeObjectURL = originalRevoke;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("materializeArchiveUrl rejects oversize blobs and purges cache", async () => {
+    const revoked: string[] = [];
+    const originalRevoke = URL.revokeObjectURL;
+    const originalFetch = globalThis.fetch;
+    URL.revokeObjectURL = (u: string) => {
+      revoked.push(u);
+    };
+    globalThis.fetch = (async () =>
+      ({
+        blob: async () => ({ size: MAX_ENTRY_UNCOMPRESSED_BYTES + 1 }),
+      }) as Response) as typeof fetch;
+    try {
+      const cache: Record<string, string> = {
+        "/OEBPS/images/big.png": "blob:too-big",
+      };
+      const book = {
+        archive: {
+          urlCache: cache,
+          createUrl: async () => "blob:too-big",
+        },
+      } as unknown as AdaptedBook;
+
+      const result = await materializeArchiveUrl(book, "OEBPS/images/big.png");
+      expect(result).toBeNull();
+      expect(revoked).toContain("blob:too-big");
+    } finally {
+      URL.revokeObjectURL = originalRevoke;
+      globalThis.fetch = originalFetch;
+    }
+  });
 
   it("enforceNoArchiveReplacements clears eager blob maps and no-ops replacements()", async () => {
     const revoked: string[] = [];

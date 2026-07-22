@@ -67,10 +67,126 @@ export async function closeTocIfOpen(page: Page): Promise<void> {
   if ((await closeButtons.count()) === 0) {
     return;
   }
-  await closeButtons.first().click({ force: true });
+  // Prefer real hit-test; force only if chrome is covered mid-animation.
+  try {
+    await closeButtons.first().click({ timeout: 2_000 });
+  } catch {
+    await closeButtons.first().click({ force: true });
+  }
   await expect(page.getByRole("navigation", { name: "目錄" })).toBeHidden({
     timeout: 10_000,
   });
+}
+
+/** Read resume coordinates from the reader shell. */
+export async function readReaderLocation(page: Page): Promise<{
+  cfi: string;
+  spineHref: string;
+  percent: number;
+}> {
+  const shell = page.locator("[aria-label^='閱讀']").first();
+  await expect(shell).toHaveAttribute("data-cfi", /epubcfi\s*\(/i, {
+    timeout: 30_000,
+  });
+  const percentRaw = (await shell.getAttribute("data-progress-percent")) || "";
+  const percent = Number.parseFloat(percentRaw);
+  return {
+    cfi: (await shell.getAttribute("data-cfi")) || "",
+    spineHref: (await shell.getAttribute("data-spine-href")) || "",
+    percent: Number.isFinite(percent) ? percent : 0,
+  };
+}
+
+/**
+ * Wait until data-cfi stops changing (paginated relocate can emit intermediate CFIs).
+ */
+export async function waitForStableReaderLocation(
+  page: Page,
+  settleMs = 400,
+  timeoutMs = 15_000,
+): Promise<{ cfi: string; spineHref: string; percent: number }> {
+  const deadline = Date.now() + timeoutMs;
+  let last = await readReaderLocation(page);
+  let stableSince = Date.now();
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(150);
+    const next = await readReaderLocation(page);
+    if (
+      next.cfi === last.cfi &&
+      next.spineHref === last.spineHref &&
+      next.percent === last.percent
+    ) {
+      if (Date.now() - stableSince >= settleMs) {
+        return next;
+      }
+    } else {
+      last = next;
+      stableSince = Date.now();
+    }
+  }
+  return last;
+}
+
+/**
+ * Stub parent window.open before any navigation. External-link bridge must
+ * call this with noopener rather than navigating the chapter iframe.
+ */
+export async function installOpenStub(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as {
+      __openCalls: Array<{ url: string; target: string; features: string }>;
+      open: typeof window.open;
+    };
+    w.__openCalls = [];
+    w.open = ((url?: string | URL, target?: string, features?: string) => {
+      w.__openCalls.push({
+        url: String(url ?? ""),
+        target: String(target ?? ""),
+        features: String(features ?? ""),
+      });
+      return null;
+    }) as typeof window.open;
+  });
+}
+
+export async function getOpenCalls(
+  page: Page,
+): Promise<Array<{ url: string; target: string; features: string }>> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      __openCalls?: Array<{ url: string; target: string; features: string }>;
+    };
+    return w.__openCalls ?? [];
+  });
+}
+
+/** Wait until a revealed archive image has a blob/data src and decoded pixels. */
+export async function expectImageRevealedAndDecoded(
+  page: Page,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const frame of contentFrames(page)) {
+      try {
+        const ok = await frame.locator("img").evaluateAll((imgs) =>
+          imgs.some((img) => {
+            const src = img.getAttribute("src") || "";
+            if (!src.startsWith("blob:") && !src.startsWith("data:")) {
+              return false;
+            }
+            const el = img as HTMLImageElement;
+            return el.naturalWidth > 0 && el.naturalHeight > 0;
+          }),
+        );
+        if (ok) return;
+      } catch {
+        // ignore
+      }
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error("No decoded blob/data image found after reveal");
 }
 
 export async function openSettings(page: Page): Promise<void> {

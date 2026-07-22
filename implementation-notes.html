@@ -4,57 +4,37 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Books — Implementation Notes</title>
-  <style>body{max-width:900px;margin:3rem auto;padding:0 1.25rem;color:#18342d;background:#f7f5ed;font:16px/1.65 system-ui,sans-serif}h1,h2{font-family:Georgia,"Noto Serif TC",serif}code{background:#e8e5d8;padding:.15rem .35rem;border-radius:.25rem}a{color:#205f50}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #cfc9b8;padding:.4rem .55rem;text-align:left}th{background:#e8e5d8}.stale{opacity:.7;font-size:.92em}</style>
+  <style>body{max-width:900px;margin:3rem auto;padding:0 1.25rem;color:#18342d;background:#f7f5ed;font:16px/1.65 system-ui,sans-serif}h1,h2{font-family:Georgia,"Noto Serif TC",serif}code{background:#e8e5d8;padding:.15rem .35rem;border-radius:.25rem}a{color:#205f50}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #cfc9b8;padding:.4rem .55rem;text-align:left}th{background:#e8e5d8}</style>
 </head>
 <body>
   <h1>Books implementation notes</h1>
-  <p><strong>Working convention:</strong> Read this file before making meaningful project changes. Update it with fresh verification evidence before declaring work complete. Historical verification tables below are labelled; only the newest table is authoritative.</p>
+  <p><strong>Convention:</strong> Read before meaningful changes. Only <a href="docs/code-review-CURRENT.md">docs/code-review-CURRENT.md</a> holds the current blocker table. The dated review log is history, not current status.</p>
 
-  <h2>Current status (authoritative)</h2>
-  <p><strong>Branch:</strong> <code>feature/release-0.1</code> worktree <code>D:\Projects\ebook\.worktrees\release-0.1</code>.</p>
-  <p><strong>Product:</strong> Privacy-first Preact PWA EPUB reader — multi-book local library, per-book CFI progress, paginated/scrolled flow, chapter-local OpenCC, tap-to-load archive images, offline precache, installed-PWA share target (no server upload of EPUB bytes).</p>
-  <p><strong>Deploy target:</strong> <code>https://books.pkwor.com</code> (Cloudflare Pages static only). Live domain deploy and physical iPhone Safari remain external prerequisites — not claimed green here.</p>
+  <h2>Product</h2>
+  <p>Privacy-first Preact PWA EPUB reader on <code>feature/release-0.1</code>: multi-book IDB library, per-book CFI progress, paginated/scrolled flow, chapter-local OpenCC, tap-to-load archive images, offline precache, share target without server EPUB upload. Target URL <code>https://books.pkwor.com</code> (Cloudflare Pages static).</p>
 
-  <h2>Security / memory decisions in force</h2>
+  <h2>Security / memory controls in force</h2>
   <ul>
-    <li><strong>Scripts:</strong> <code>allowScriptedContent: false</code>; chapter CSP <code>script-src 'none'</code>; parent-document image gates (no iframe script dependency).</li>
-    <li><strong>Replacements:</strong> literal <code>replacements: "none"</code>; <code>installNoArchiveReplacementsGuard()</code> <em>before</em> <code>book.ready</code> so CSS/asset blob maps cannot race packaging.</li>
-    <li><strong>Images:</strong> materialize on reveal only; fail closed to <code>blob:</code>/<code>data:</code>; late <code>createUrl</code> after timeout is revoked + purged from <code>urlCache</code>; oversized blobs revoked and cache keys purged.</li>
-    <li><strong>External links:</strong> marked <code>data-epub-external</code>; parent click bridge uses cross-realm-safe element checks (not parent <code>instanceof Element</code>) and <code>window.open(..., "noopener,noreferrer")</code>.</li>
-    <li><strong>Storage:</strong> IDB v3 <code>bookMeta</code>/<code>bookPayload</code> + <code>shareInbox</code> <code>byReceivedAt</code> key cursor; durable probe retries (8s × 3) before session-only so WebKit reload does not drop the library.</li>
-    <li><strong>ZIP:</strong> declared ceilings plus <code>internalStream</code> byte counting that aborts mid-inflate past the bound.</li>
+    <li><code>allowScriptedContent: false</code> + chapter CSP <code>script-src 'none'</code> + parent image gates.</li>
+    <li><code>replacements: "none"</code> + pre-<code>ready</code> no-replacement guard (blocks archive-wide CSS blob maps).</li>
+    <li>Image materialize: fail-closed blob/data; late <code>createUrl</code> disposed; size-check fail-closed; cache purged by value and path keys.</li>
+    <li>External links: cross-realm-safe click bridge → parent <code>window.open(..., "noopener,noreferrer")</code>.</li>
+    <li>Durable IDB probe retries before session-only; share expiry uses <code>byReceivedAt</code> key cursor (IDB v3).</li>
+    <li>ZIP: declared ceilings + <code>internalStream</code> consumer abort (worker may still inflate — residual R1).</li>
   </ul>
 
-  <h2>Related documents</h2>
-  <ul>
-    <li><a href="docs/superpowers/specs/2026-07-21-pwa-epub-reader-design.md">Approved product and architecture design</a></li>
-    <li><a href="docs/superpowers/plans/2026-07-21-pwa-epub-reader-release-0.1.md">Executable TDD implementation plan</a></li>
-    <li><a href="docs/code-review-2026-07-21.md">Critical code review log (includes re-review history)</a></li>
-    <li><a href="docs/release-checklist-0.1.md">Release 0.1 checklist</a></li>
-  </ul>
+  <h2>Verification</h2>
+  <p>Record results in <a href="docs/code-review-CURRENT.md">code-review-CURRENT.md</a> gates table after each full run. Do not paste contradictory historical “all fixed” tables here.</p>
 
-  <h2>Verification (pass 4 — latest, measured)</h2>
-  <p>Recorded after deep-fix of: WebKit durable library survival, late blob revoke, cache purge on oversize, cross-realm external links, streaming ZIP bounds, and non-false-green resume/image/CSP E2E.</p>
-  <table>
-    <thead><tr><th>Command</th><th>Result</th></tr></thead>
-    <tbody>
-      <tr><td><code>npm run check</code></td><td>pass</td></tr>
-      <tr><td><code>npm run test:run</code></td><td><strong>117</strong> tests / 17 files</td></tr>
-      <tr><td><code>npm run build</code> / <code>check:bundle</code></td><td>pass; shell <strong>60600</strong> gzip</td></tr>
-      <tr><td><code>npm audit</code></td><td><strong>0</strong> via <code>@xmldom/xmldom@0.9.10</code> override</td></tr>
-      <tr><td><code>npm run test:e2e</code></td><td><strong>32/32</strong> in ~2.6 min (chromium, webkit, Mobile Chrome, Mobile Safari)</td></tr>
-    </tbody>
-  </table>
-
-  <h2 class="stale">Historical verification (stale — do not treat as current)</h2>
-  <p class="stale">Earlier tables (Task 12 28/28, pass with 31/32 WebKit fail, pass-3 32/32) are retained only in <a href="docs/code-review-2026-07-21.md">code-review-2026-07-21.md</a>. Contradictory “fixed” rows that predate later re-reviews are superseded by the newest “Remaining blockers” / “Deep remediation” sections in that file.</p>
-
-  <h2>Still open (honest)</h2>
+  <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>
-    <li>Live <code>books.pkwor.com</code> canary after Cloudflare Pages deploy.</li>
-    <li>Full allowlist sanitizer (still denylist + CSP defence-in-depth).</li>
-    <li>epubjs 0.4 major upgrade / maintained fork (API surface still 0.3.93 + xmldom override).</li>
+    <li>Live domain canary.</li>
+    <li>Allowlist sanitizer (optional post-0.1).</li>
+    <li>epubjs 0.4 major / maintained fork decision.</li>
   </ol>
+
+  <h2>Archive</h2>
+  <p>Narrative history of re-reviews: <a href="docs/code-review-2026-07-21.md">docs/code-review-2026-07-21.md</a>.</p>
 </body>
 </html>

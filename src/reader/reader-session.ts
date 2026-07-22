@@ -166,7 +166,13 @@ class ReaderSessionImpl implements ReaderSession {
     inFrameButton: HTMLElement;
     button: HTMLButtonElement;
   }> = [];
-  private parentGateRepositionTimer: ReturnType<typeof setInterval> | null =
+  /** Parent overlays for external links (WebKit iframe listeners are unreliable). */
+  private parentExternalLinks: Array<{
+    anchor: Element;
+    button: HTMLButtonElement;
+    href: string;
+  }> = [];
+  private parentOverlayRepositionTimer: ReturnType<typeof setInterval> | null =
     null;
   private externalLinkDisposer: (() => void) | null = null;
   private readonly converter = new ChapterConverter();
@@ -251,9 +257,34 @@ class ReaderSessionImpl implements ReaderSession {
       this.applyAppearance(this.appearance);
 
       const target = resumeCfi;
-      await this.displayInternal(target, gen);
-      if (!this.isCurrent(gen)) {
-        throw staleError();
+      // epubjs on narrow viewports is more reliable if the first paint opens the
+      // default spine item, then a second display() applies the saved CFI.
+      if (target && target.includes("epubcfi")) {
+        await this.displayInternal(undefined, gen);
+        if (!this.isCurrent(gen)) {
+          throw staleError();
+        }
+        await waitMs(50);
+        await this.displayInternal(target, gen);
+        if (!this.isCurrent(gen)) {
+          throw staleError();
+        }
+        // Retry a few times if relocate settles at chapter start.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (!this.isCurrent(gen)) {
+            throw staleError();
+          }
+          if (this.location?.cfi === target) {
+            break;
+          }
+          await waitMs(60 * (attempt + 1));
+          await this.displayInternal(target, gen);
+        }
+      } else {
+        await this.displayInternal(target, gen);
+        if (!this.isCurrent(gen)) {
+          throw staleError();
+        }
       }
 
       const summary = readBookSummary(book);
@@ -507,13 +538,73 @@ class ReaderSessionImpl implements ReaderSession {
     // Sandbox without allow-scripts: in-iframe listeners are unreliable on
     // WebKit. Parent-document overlay buttons receive real clicks safely.
     this.installParentImageGates(doc, materialize);
+    this.installParentExternalLinks(doc);
+  }
+
+  private clearParentOverlaysTimer(): void {
+    if (this.parentOverlayRepositionTimer !== null) {
+      clearInterval(this.parentOverlayRepositionTimer);
+      this.parentOverlayRepositionTimer = null;
+    }
+  }
+
+  /** Reposition all parent overlays (image gates + external links). */
+  private repositionParentOverlays(): void {
+    if (typeof document === "undefined") return;
+    const iframe = this.element.querySelector("iframe");
+    if (!iframe) return;
+    const iframeRect = iframe.getBoundingClientRect();
+    const stage = this.element.getBoundingClientRect();
+
+    for (const pair of this.parentGatePairs) {
+      try {
+        const rect = pair.img.getBoundingClientRect();
+        const left = iframeRect.left + rect.left;
+        const top = iframeRect.top + rect.top;
+        if (rect.width > 2 && rect.height > 2) {
+          pair.button.style.left = `${Math.max(0, left)}px`;
+          pair.button.style.top = `${Math.max(0, top - 48)}px`;
+          pair.button.style.visibility = "visible";
+        } else {
+          pair.button.style.left = `${Math.max(8, stage.left + 8)}px`;
+          pair.button.style.top = `${Math.max(8, stage.top + 56)}px`;
+          pair.button.style.visibility = "visible";
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    for (const pair of this.parentExternalLinks) {
+      try {
+        const rect = pair.anchor.getBoundingClientRect();
+        const left = iframeRect.left + rect.left;
+        const top = iframeRect.top + rect.top;
+        if (rect.width > 2 && rect.height > 2) {
+          pair.button.style.left = `${Math.max(0, left)}px`;
+          pair.button.style.top = `${Math.max(0, top)}px`;
+          pair.button.style.width = `${Math.max(44, rect.width)}px`;
+          pair.button.style.height = `${Math.max(44, rect.height)}px`;
+          pair.button.style.visibility = "visible";
+        } else {
+          pair.button.style.left = `${Math.max(8, stage.left + 8)}px`;
+          pair.button.style.top = `${Math.max(8, stage.top + 100)}px`;
+          pair.button.style.visibility = "visible";
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private ensureParentOverlayTimer(): void {
+    if (this.parentOverlayRepositionTimer !== null) return;
+    this.parentOverlayRepositionTimer = setInterval(() => {
+      this.repositionParentOverlays();
+    }, 400);
   }
 
   private clearParentImageGates(): void {
-    if (this.parentGateRepositionTimer !== null) {
-      clearInterval(this.parentGateRepositionTimer);
-      this.parentGateRepositionTimer = null;
-    }
     for (const pair of this.parentGatePairs) {
       try {
         pair.button.remove();
@@ -522,6 +613,26 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
     this.parentGatePairs = [];
+    if (
+      this.parentExternalLinks.length === 0 &&
+      this.parentGatePairs.length === 0
+    ) {
+      this.clearParentOverlaysTimer();
+    }
+  }
+
+  private clearParentExternalLinks(): void {
+    for (const pair of this.parentExternalLinks) {
+      try {
+        pair.button.remove();
+      } catch {
+        // ignore
+      }
+    }
+    this.parentExternalLinks = [];
+    if (this.parentGatePairs.length === 0) {
+      this.clearParentOverlaysTimer();
+    }
   }
 
   private clearExternalLinkBridge(): void {
@@ -533,42 +644,98 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.externalLinkDisposer = null;
     }
+    this.clearParentExternalLinks();
+  }
+
+  private openExternalHref(href: string): void {
+    const trimmed = href.trim();
+    if (!trimmed) return;
+    const lower = trimmed.toLowerCase();
+    let absolute = trimmed;
+    if (lower.startsWith("//")) {
+      absolute = `https:${trimmed}`;
+    } else if (!lower.startsWith("http:") && !lower.startsWith("https:")) {
+      return;
+    }
+    try {
+      window.open(absolute, "_blank", "noopener,noreferrer");
+    } catch {
+      // Popup blocked — leave inert.
+    }
   }
 
   /**
-   * Parent-context click bridge for external anchors. iframe sandbox lacks
-   * allow-popups, so target=_blank alone cannot open a safe new tab; we open
-   * from the parent with noopener instead.
+   * In-iframe capture bridge for engines that deliver clicks to content
+   * listeners. WebKit often does not; parent overlays cover that path.
    */
   private installExternalLinkBridge(doc: Document): void {
     this.clearExternalLinkBridge();
     const onClick = (event: Event): void => {
-      // Cross-realm: iframe EventTarget is not `instanceof` parent Element.
       const target = eventTargetElement(event.target);
       if (!target) return;
       const anchor = closestElement(target, "a[data-epub-external='1']");
       if (!anchor) return;
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) return;
-      const lower = href.toLowerCase();
-      let absolute = href;
-      if (lower.startsWith("//")) {
-        absolute = `https:${href}`;
-      } else if (!lower.startsWith("http:") && !lower.startsWith("https:")) {
-        return;
-      }
       event.preventDefault();
       event.stopPropagation();
-      try {
-        window.open(absolute, "_blank", "noopener,noreferrer");
-      } catch {
-        // Popup blocked — leave the link inert rather than navigating the iframe.
-      }
+      this.openExternalHref(href);
     };
     doc.addEventListener("click", onClick, true);
     this.externalLinkDisposer = () => {
       doc.removeEventListener("click", onClick, true);
     };
+  }
+
+  /**
+   * Parent fixed hit-targets over external anchors — required on WebKit where
+   * sandboxed chapter documents do not reliably fire scripted click handlers.
+   */
+  private installParentExternalLinks(doc: Document): void {
+    this.clearParentExternalLinks();
+    if (typeof document === "undefined") return;
+    const iframe = this.element.querySelector("iframe");
+    if (!iframe) return;
+
+    const anchors = Array.from(
+      doc.querySelectorAll("a[data-epub-external='1']"),
+    );
+    for (const anchor of anchors) {
+      const href = (anchor.getAttribute("href") || "").trim();
+      if (!href) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "epub-parent-external-link touch-target";
+      button.setAttribute(
+        "aria-label",
+        `開啟外部連結：${href}`,
+      );
+      button.textContent = anchor.textContent?.trim() || "外部連結";
+      button.style.position = "fixed";
+      button.style.zIndex = "19";
+      button.style.minWidth = "44px";
+      button.style.minHeight = "44px";
+      button.style.pointerEvents = "auto";
+      button.style.maxWidth = "16rem";
+      button.style.visibility = "hidden";
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.openExternalHref(href);
+      });
+      document.body.appendChild(button);
+      this.parentExternalLinks.push({ anchor, button, href });
+      // Prefer parent control; keep in-frame link for semantics only.
+      try {
+        (anchor as HTMLElement).style.pointerEvents = "none";
+      } catch {
+        // ignore
+      }
+    }
+
+    this.repositionParentOverlays();
+    requestAnimationFrame(() => this.repositionParentOverlays());
+    this.ensureParentOverlayTimer();
   }
 
   /**
@@ -616,45 +783,6 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
-    const stage = this.element.getBoundingClientRect();
-
-    const mapRectToTop = (
-      img: HTMLImageElement,
-    ): { left: number; top: number; width: number; height: number } => {
-      const iframeRect = iframe.getBoundingClientRect();
-      const rect = img.getBoundingClientRect();
-      // iframe-local coordinates → top-document viewport.
-      return {
-        left: iframeRect.left + rect.left,
-        top: iframeRect.top + rect.top,
-        width: rect.width,
-        height: rect.height,
-      };
-    };
-
-    const reposition = (): void => {
-      for (const pair of this.parentGatePairs) {
-        try {
-          const mapped = mapRectToTop(pair.img);
-          const hasBox = mapped.width > 2 && mapped.height > 2;
-          if (hasBox) {
-            pair.button.style.left = `${Math.max(0, mapped.left)}px`;
-            pair.button.style.top = `${Math.max(0, mapped.top - 48)}px`;
-            pair.button.style.visibility = "visible";
-          } else {
-            // Image not laid out yet — park the control in the reader stage so
-            // WebKit still exposes a tappable gate.
-            const stageRect = this.element.getBoundingClientRect();
-            pair.button.style.left = `${Math.max(8, stageRect.left + 8)}px`;
-            pair.button.style.top = `${Math.max(8, stageRect.top + 56)}px`;
-            pair.button.style.visibility = "visible";
-          }
-        } catch {
-          // ignore
-        }
-      }
-    };
-
     for (const candidate of candidates) {
       const button = document.createElement("button");
       button.type = "button";
@@ -697,11 +825,9 @@ class ReaderSessionImpl implements ReaderSession {
       document.body.appendChild(button);
       this.parentGatePairs.push(pair);
     }
-    // First layout may need a frame; stage fallback keeps buttons reachable.
-    void stage;
-    reposition();
-    requestAnimationFrame(reposition);
-    this.parentGateRepositionTimer = setInterval(reposition, 400);
+    this.repositionParentOverlays();
+    requestAnimationFrame(() => this.repositionParentOverlays());
+    this.ensureParentOverlayTimer();
   }
 
   private makeMaterialize():

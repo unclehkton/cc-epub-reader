@@ -19,7 +19,7 @@ test.describe("offline", () => {
 
     // Import while online so IndexedDB has content for offline resume checks.
     await importEpub(page, FIXTURE_READER);
-    await waitForBookTitle(page, "阅读夹具");
+    await waitForBookTitle(page, "閱讀夾具");
 
     // Give Workbox a moment to finish precache.
     await page.waitForTimeout(1500);
@@ -83,11 +83,11 @@ test.describe("offline", () => {
       timeout: 30_000,
     });
     await expect(
-      page.getByRole("button", { name: "開啟 阅读夹具" }),
+      page.getByRole("button", { name: "開啟 閱讀夾具" }),
     ).toBeVisible();
 
     // Opening the book should still work from IndexedDB + precached chunks.
-    await openBook(page, "阅读夹具");
+    await openBook(page, "閱讀夾具");
     await expect(page.getByLabel(/閱讀：/)).toBeVisible();
 
     await context.setOffline(false);

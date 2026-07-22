@@ -529,8 +529,21 @@ export function App() {
         const book = await repository.getBook(next.book.id);
         if (book && "epub" in book && book.epub) {
           const selection: BookSelection = { book };
-          if (next.progress) {
-            selection.progress = next.progress;
+          // Prefer a fresh listBooks progress snapshot over the click-time row
+          // (Mobile Safari can open before the post-close remount finishes
+          // wiring the latest CFI from IDB onto the list entry).
+          let progress = next.progress;
+          try {
+            const rows = await repository.listBooks();
+            const row = rows.find((r) => r.book.id === next.book.id);
+            if (row?.progress) {
+              progress = row.progress;
+            }
+          } catch {
+            // keep click-time progress
+          }
+          if (progress) {
+            selection.progress = progress;
           }
           setSelection(selection);
           return;
@@ -553,6 +566,8 @@ export function App() {
         settingsRepository={settingsRepository}
         onClose={() => {
           setSelection(null);
+          // Remount library so listBooks reloads progress/CFI after flush.
+          setLibraryKey((k) => k + 1);
         }}
       />
     );

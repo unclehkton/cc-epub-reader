@@ -1,6 +1,9 @@
-# Release 0.1 critical code review — 2026-07-21
+# Release 0.1 critical code review — 2026-07-21 (ARCHIVE)
 
-## Verdict
+> **Authoritative current blockers:** [`code-review-CURRENT.md`](code-review-CURRENT.md).  
+> This file is retained as historical narrative only. Do **not** treat embedded “Fixed” tables as the live status.
+
+## Verdict (historical, 2026-07-21)
 
 **Do not approve or deploy this branch yet.** The automated gates now complete reliably, but the review found release-blocking security, memory, persistence, and PWA-installability defects that the current tests do not exercise.
 

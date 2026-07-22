@@ -55,8 +55,8 @@ async function buildReaderFixture(zip) {
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0" xml:lang="zh-CN">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="uid">urn:uuid:reader-fixture-0001</dc:identifier>
-    <dc:title>阅读夹具</dc:title>
-    <dc:creator>夹具作者</dc:creator>
+    <dc:title>閱讀夾具</dc:title>
+    <dc:creator>夾具作者</dc:creator>
     <dc:language>zh-CN</dc:language>
     <meta property="dcterms:modified">2026-07-21T00:00:00Z</meta>
   </metadata>
@@ -82,25 +82,25 @@ async function buildReaderFixture(zip) {
     `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">
-  <head><title>目录</title></head>
+  <head><title>目錄</title></head>
   <body>
     <nav epub:type="toc" id="toc">
-      <h1>目录</h1>
+      <h1>目錄</h1>
       <ol>
         <li>
-          <a href="ch1.xhtml">第一章 开端</a>
+          <a href="ch1.xhtml">第一章 開端</a>
           <ol>
-            <li><a href="ch1.xhtml#sec-a">第一节 简体原文</a></li>
+            <li><a href="ch1.xhtml#sec-a">第一節 簡體原文</a></li>
           </ol>
         </li>
         <li>
-          <a href="ch2.xhtml">第二章 图片与远端</a>
+          <a href="ch2.xhtml">第二章 圖片與遠端</a>
           <ol>
-            <li><a href="ch2.xhtml#local-img">本地图片</a></li>
-            <li><a href="ch2.xhtml#remote-img">远端图片</a></li>
+            <li><a href="ch2.xhtml#local-img">本地圖片</a></li>
+            <li><a href="ch2.xhtml#remote-img">遠端圖片</a></li>
           </ol>
         </li>
-        <li><a href="ch3.xhtml">第三章 敌意标记</a></li>
+        <li><a href="ch3.xhtml">第三章 敵意標記</a></li>
       </ol>
     </nav>
   </body>
@@ -115,30 +115,30 @@ async function buildReaderFixture(zip) {
   <head>
     <meta name="dtb:uid" content="urn:uuid:reader-fixture-0001"/>
   </head>
-  <docTitle><text>阅读夹具</text></docTitle>
+  <docTitle><text>閱讀夾具</text></docTitle>
   <navMap>
     <navPoint id="np1" playOrder="1">
-      <navLabel><text>第一章 开端</text></navLabel>
+      <navLabel><text>第一章 開端</text></navLabel>
       <content src="ch1.xhtml"/>
       <navPoint id="np1a" playOrder="2">
-        <navLabel><text>第一节 简体原文</text></navLabel>
+        <navLabel><text>第一節 簡體原文</text></navLabel>
         <content src="ch1.xhtml#sec-a"/>
       </navPoint>
     </navPoint>
     <navPoint id="np2" playOrder="3">
-      <navLabel><text>第二章 图片与远端</text></navLabel>
+      <navLabel><text>第二章 圖片與遠端</text></navLabel>
       <content src="ch2.xhtml"/>
       <navPoint id="np2a" playOrder="4">
-        <navLabel><text>本地图片</text></navLabel>
+        <navLabel><text>本地圖片</text></navLabel>
         <content src="ch2.xhtml#local-img"/>
       </navPoint>
       <navPoint id="np2b" playOrder="5">
-        <navLabel><text>远端图片</text></navLabel>
+        <navLabel><text>遠端圖片</text></navLabel>
         <content src="ch2.xhtml#remote-img"/>
       </navPoint>
     </navPoint>
     <navPoint id="np3" playOrder="6">
-      <navLabel><text>第三章 敌意标记</text></navLabel>
+      <navLabel><text>第三章 敵意標記</text></navLabel>
       <content src="ch3.xhtml"/>
     </navPoint>
   </navMap>
@@ -150,11 +150,11 @@ async function buildReaderFixture(zip) {
     `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="zh-CN">
-  <head><title>第一章 开端</title></head>
+  <head><title>第一章 開端</title></head>
   <body>
-    <h1 id="sec-a">第一章 开端</h1>
+    <h1 id="sec-a">第一章 開端</h1>
     <p data-testid="fixture-simplified">这是简体中文测试段落，用于验证香港繁体转换：软件、网络、里面、头发。</p>
-    <p>第二段继续阅读进度，方便跨章节恢复位置。</p>
+    <p>第二段繼續閱讀進度，方便跨章節恢復位置。</p>
   </body>
 </html>`,
   );
@@ -164,14 +164,14 @@ async function buildReaderFixture(zip) {
     `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="zh-CN">
-  <head><title>第二章 图片与远端</title></head>
+  <head><title>第二章 圖片與遠端</title></head>
   <body>
-    <h1>第二章 图片与远端</h1>
-    <p id="local-img">本地档案图片（应被门控）：</p>
-    <img src="images/local.png" alt="本地夹具图" width="32" height="32"/>
-    <p id="remote-img">远端图片（绝不可加载）：</p>
-    <img src="https://privacy-trap.example/remote-pixel.png" alt="远端陷阱" width="1" height="1"/>
-    <p>章节正文：繁体转换应作用于「学习」「发现」等简体字。</p>
+    <h1>第二章 圖片與遠端</h1>
+    <p id="local-img">本地檔案圖片（應被門控）：</p>
+    <img src="images/local.png" alt="本地夾具圖" width="32" height="32"/>
+    <p id="remote-img">遠端圖片（絕不可載入）：</p>
+    <img src="https://privacy-trap.example/remote-pixel.png" alt="遠端陷阱" width="1" height="1"/>
+    <p>章節正文：繁體轉換應作用於「學習」「發現」等簡體字。</p>
   </body>
 </html>`,
   );
@@ -183,22 +183,25 @@ async function buildReaderFixture(zip) {
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="zh-CN">
   <head>
-    <title>第三章 敌意标记</title>
+    <title>第三章 敵意標記</title>
     <meta http-equiv="refresh" content="0;url=https://evil.example/"/>
     <link rel="stylesheet" href="https://evil.example/track.css"/>
   </head>
   <body>
-    <h1>第三章 敌意标记</h1>
-    <p>本章含有应被净化的敌意内容。</p>
+    <h1>第三章 敵意標記</h1>
+    <p>本章含有應被淨化的敵意內容。</p>
+    <p>安全外部連結（應經父層 noopener 開啟，不可在 iframe 內導航）：</p>
+    <a href="https://example.com/epub-external-test" id="fixture-external-link">外部連結示例</a>
+    <a href="//example.com/protocol-relative-external" id="fixture-proto-external">協議相對外部連結</a>
     <script>window.__hostile = true;</script>
     <iframe src="https://evil.example/frame"></iframe>
     <object data="https://evil.example/obj"></object>
     <embed src="https://evil.example/embed"/>
     <form action="https://evil.example/submit"><input type="text" name="q"/></form>
     <base href="https://evil.example/"/>
-    <a href="javascript:alert(1)">坏连结</a>
+    <a href="javascript:alert(1)">壞連結</a>
     <img src="x" onerror="window.__onerror=1" alt="onerror trap"/>
-    <p onclick="window.__click=1">点击陷阱段落，简体字：电脑、鼠标。</p>
+    <p onclick="window.__click=1">點擊陷阱段落，簡體字：電腦、滑鼠。</p>
     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
       <animate attributeName="x" from="0" to="10" dur="1s"/>
       <foreignObject width="10" height="10"><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject>
@@ -224,7 +227,7 @@ async function buildLargeChapter(zip) {
   const paragraphs = [];
   for (let i = 1; i <= 200; i += 1) {
     paragraphs.push(
-      `<p>第${i}段：这是用于转换压力测试的简体中文长章节。软件网络里面头发学习发现电脑鼠标字体转换应当保持稳定。</p>`,
+      `<p>第${i}段：這是用於轉換壓力測試的簡體中文長章節樣本句（內含簡體字供轉換）：软件网络里面头发学习发现电脑鼠标。</p>`,
     );
   }
   const body = paragraphs.join("\n    ");
@@ -235,8 +238,8 @@ async function buildLargeChapter(zip) {
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="uid">urn:uuid:large-chapter-0001</dc:identifier>
-    <dc:title>长章节压力夹具</dc:title>
-    <dc:creator>压力测试</dc:creator>
+    <dc:title>長章節壓力夾具</dc:title>
+    <dc:creator>壓力測試</dc:creator>
     <dc:language>zh-CN</dc:language>
   </metadata>
   <manifest>
@@ -254,9 +257,9 @@ async function buildLargeChapter(zip) {
     `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
-  <head><title>目录</title></head>
+  <head><title>目錄</title></head>
   <body>
-    <nav epub:type="toc"><ol><li><a href="ch1.xhtml">长章节</a></li></ol></nav>
+    <nav epub:type="toc"><ol><li><a href="ch1.xhtml">長章節</a></li></ol></nav>
   </body>
 </html>`,
   );
@@ -266,9 +269,9 @@ async function buildLargeChapter(zip) {
     `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="zh-CN">
-  <head><title>长章节</title></head>
+  <head><title>長章節</title></head>
   <body>
-    <h1>长章节压力测试</h1>
+    <h1>長章節壓力測試</h1>
     ${body}
   </body>
 </html>`,

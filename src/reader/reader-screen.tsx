@@ -394,10 +394,23 @@ export function ReaderScreen({
   }, [focusMode, isFullscreen]);
 
   const handleClose = useCallback(() => {
-    void tracker.flush().finally(() => {
+    // Prefer React location state (matches data-cfi shown in chrome / tests),
+    // then fall back to the session's last mapped location.
+    if (location) {
+      tracker.onRelocated(location);
+    } else {
+      const loc = sessionRef.current?.getLocation();
+      if (loc) {
+        tracker.onRelocated(loc);
+      }
+    }
+    void (async () => {
+      await tracker.flush();
+      // Drain again if a write error restored pending mid-flush.
+      await tracker.flush();
       onClose();
-    });
-  }, [onClose, tracker]);
+    })();
+  }, [onClose, tracker, location]);
 
   const percentLabel =
     location && Number.isFinite(location.approximatePercent)
@@ -437,6 +450,11 @@ export function ReaderScreen({
       aria-label={`閱讀：${title}`}
       data-spine-href={location?.spineHref ?? ""}
       data-cfi={location?.cfi ?? ""}
+      data-progress-percent={
+        location && Number.isFinite(location.approximatePercent)
+          ? String(location.approximatePercent)
+          : ""
+      }
       data-spine-index={
         location && Number.isFinite(location.spineIndex)
           ? String(location.spineIndex)

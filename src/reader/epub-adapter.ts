@@ -359,9 +359,31 @@ export function createArchiveResolver(
   };
 }
 
+const MATERIALIZE_TIMEOUT_MS = 4_000;
+
+/**
+ * Revoke a blob URL and drop every urlCache entry that points at it (and the
+ * candidate path keys we tried). Safe to call with non-blob values.
+ */
+export function disposeMaterializedUrl(
+  book: AdaptedBook,
+  url: string | null | undefined,
+  pathKeys: Iterable<string> = [],
+): void {
+  if (typeof url === "string" && url.startsWith("blob:")) {
+    revokeBlobLike(url);
+    purgeArchiveUrlCache(book, [url]);
+  }
+  purgeArchiveUrlCacheKeys(book, pathKeys);
+}
+
 /**
  * Create a blob/object URL for one package path when the reader reveals an image.
  * Tracks the URL for later revoke on chapter/session teardown.
+ *
+ * In-flight createUrl work cannot be aborted inside EPUB.js; we mark attempts
+ * abandoned on timeout and dispose any late-resolving blob so it is not leaked.
+ * Size checks are fail-closed: any failure to verify size rejects the URL.
  */
 export async function materializeArchiveUrl(
   book: AdaptedBook,
@@ -412,69 +434,88 @@ export async function materializeArchiveUrl(
         ? (p: string) => book.resources!.createUrl!(p)
         : null;
 
-  if (create) {
-    for (const candidate of candidates) {
-      // If createUrl resolves after our timeout, we must still revoke/purge the
-      // late blob so it is not orphaned in archive.urlCache.
-      let abandoned = false;
-      const pending = Promise.resolve()
-        .then(() => create(candidate))
-        .then((url) => {
-          if (!abandoned) return url;
-          if (typeof url === "string" && url.startsWith("blob:")) {
-            revokeBlobLike(url);
-            purgeArchiveUrlCache(book, [url]);
-            purgeArchiveUrlCacheKeys(book, [candidate, path]);
-          }
-          return null;
-        })
-        .catch(() => null);
+  if (!create) return null;
 
-      try {
-        const raced = await Promise.race([
-          pending.then((url) => ({ kind: "ok" as const, url })),
-          new Promise<{ kind: "timeout" }>((resolve) => {
-            setTimeout(() => {
-              abandoned = true;
-              resolve({ kind: "timeout" });
-            }, 4000);
-          }),
-        ]);
-        if (raced.kind === "timeout") {
-          continue;
+  for (const candidate of candidates) {
+    // Path keys that may appear in archive.urlCache for this attempt.
+    const cacheKeys = [candidate, path];
+    let abandoned = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const tracked = Promise.resolve()
+      .then(() => create(candidate))
+      .then((url) => {
+        if (abandoned) {
+          disposeMaterializedUrl(book, url, cacheKeys);
+          return null;
         }
-        const raw = raced.url;
-        if (typeof raw !== "string" || !raw.trim()) {
-          continue;
-        }
-        const out = raw.trim();
-        // Fail closed: only accept verified blob/data object URLs.
-        if (!out.startsWith("blob:") && !out.startsWith("data:")) {
-          continue;
-        }
-        // Bound materialised image size (defence against forged ZIP entries).
-        if (out.startsWith("blob:") && typeof fetch === "function") {
-          try {
-            const head = await fetch(out);
-            const blob = await head.blob();
-            if (blob.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
-              revokeBlobLike(out);
-              purgeArchiveUrlCache(book, [out]);
-              purgeArchiveUrlCacheKeys(book, [candidate, path]);
-              continue;
-            }
-          } catch {
-            // If we cannot size-check, still return the blob — CSP limits network.
-          }
-        }
-        if (ownedObjectUrls && out.startsWith("blob:")) {
-          ownedObjectUrls.add(out);
-        }
-        return out;
-      } catch {
-        abandoned = true;
-        // try next candidate
+        return url;
+      })
+      .catch(() => null);
+
+    try {
+      const raced = await new Promise<
+        { kind: "ok"; url: string | null } | { kind: "timeout" }
+      >((resolve) => {
+        timer = setTimeout(() => {
+          abandoned = true;
+          resolve({ kind: "timeout" });
+        }, MATERIALIZE_TIMEOUT_MS);
+        void tracked.then((url) => {
+          if (abandoned) return;
+          if (timer !== undefined) clearTimeout(timer);
+          resolve({ kind: "ok", url });
+        });
+      });
+
+      if (raced.kind === "timeout") {
+        // Late createUrl completion is disposed in tracked.then.
+        continue;
       }
+
+      const raw = raced.url;
+      if (typeof raw !== "string" || !raw.trim()) {
+        continue;
+      }
+      const out = raw.trim();
+      // Fail closed: only accept verified blob/data object URLs.
+      if (!out.startsWith("blob:") && !out.startsWith("data:")) {
+        continue;
+      }
+
+      if (out.startsWith("blob:")) {
+        // Fail closed on size: no fetch, oversize, empty, or fetch error → drop.
+        if (typeof fetch !== "function") {
+          disposeMaterializedUrl(book, out, cacheKeys);
+          continue;
+        }
+        try {
+          const response = await fetch(out);
+          const blob = await response.blob();
+          if (blob.size <= 0 || blob.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+            disposeMaterializedUrl(book, out, cacheKeys);
+            continue;
+          }
+        } catch {
+          disposeMaterializedUrl(book, out, cacheKeys);
+          continue;
+        }
+      }
+
+      // Race: timed out after we already won? Unlikely if timer cleared; re-check.
+      if (abandoned) {
+        disposeMaterializedUrl(book, out, cacheKeys);
+        continue;
+      }
+
+      if (ownedObjectUrls && out.startsWith("blob:")) {
+        ownedObjectUrls.add(out);
+      }
+      return out;
+    } catch {
+      abandoned = true;
+      if (timer !== undefined) clearTimeout(timer);
+      // try next candidate
     }
   }
 
