@@ -56,6 +56,7 @@ class FakeSession implements ReaderSession {
   displayCalls: string[] = [];
   prevCalls = 0;
   nextCalls = 0;
+  resizeCalls = 0;
   flowCalls: Array<"paginated" | "scrolled"> = [];
   conversionCalls: string[] = [];
   appearanceCalls: AppearanceSettings[] = [];
@@ -120,6 +121,10 @@ class FakeSession implements ReaderSession {
       approximatePercent: 40,
     });
     this.emit({ type: "location", location: this.location });
+  }
+
+  resize(): void {
+    this.resizeCalls += 1;
   }
 
   async setFlow(flow: "paginated" | "scrolled"): Promise<void> {
@@ -265,6 +270,17 @@ describe("ReaderScreen", () => {
     });
     expect(sessions[0]!.location?.cfi).toBe(cfiBefore);
     expect(settingsRepo.current.flow).toBe("scrolled");
+  });
+
+  it("resizes the active rendition in place without rebuilding its flow", async () => {
+    renderReader();
+    await waitFor(() => expect(sessions.length).toBe(1));
+
+    window.dispatchEvent(new Event("resize"));
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(sessions[0]!.resizeCalls).toBe(1);
+    expect(sessions[0]!.flowCalls).toHaveLength(0);
   });
 
   it("exposes the four conversion labels and applies conversion mode", async () => {

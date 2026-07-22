@@ -61,6 +61,7 @@ interface FakeControl {
   displayCalls: Array<{ target?: string | number; deferred: Deferred<void> }>;
   prevCalls: Deferred<void>[];
   nextCalls: Deferred<void>[];
+  resizeCalls: Array<{ width?: number; height?: number }>;
   bookDestroyed: boolean;
   renditionDestroyed: boolean;
   contentHooks: ReturnType<typeof createHook>;
@@ -122,6 +123,9 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         const d = deferred<void>();
         control.prevCalls.push(d);
         return d.promise;
+      },
+      resize(width?: number, height?: number) {
+        control.resizeCalls.push({ width, height });
       },
       destroy() {
         control.renditionDestroyed = true;
@@ -221,6 +225,7 @@ function createControl(): FakeControl {
     displayCalls: [],
     prevCalls: [],
     nextCalls: [],
+    resizeCalls: [],
     bookDestroyed: false,
     renditionDestroyed: false,
     contentHooks: createHook(),
@@ -396,6 +401,19 @@ describe("ReaderSession generation ownership", () => {
     await expect(session.display("ch1.xhtml")).rejects.toThrow(/destroyed/i);
 
     revokeSpy.mockRestore();
+  });
+
+  it("resizes the current rendition without destroying or redisplaying it", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+
+    const initialDisplayCount = control.displayCalls.length;
+    (session as unknown as { resize(): void }).resize();
+
+    expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
+    expect(control.renditionDestroyed).toBe(false);
+    expect(control.displayCalls).toHaveLength(initialDisplayCount);
   });
 
   it("registers transform only on spine.hooks.content, never rendition.hooks.content", async () => {

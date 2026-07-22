@@ -68,6 +68,7 @@ export interface ReaderSession {
   display(target?: string): Promise<void>;
   goPrevious(): Promise<void>;
   goNext(): Promise<void>;
+  resize(): void;
   setFlow(flow: "paginated" | "scrolled"): Promise<void>;
   setConversion(mode: ConversionMode): Promise<void>;
   applyAppearance(settings: AppearanceSettings): void;
@@ -378,6 +379,11 @@ class ReaderSessionImpl implements ReaderSession {
     } finally {
       this.endOp();
     }
+  }
+
+  resize(): void {
+    this.assertAlive();
+    this.rendition?.resize?.();
   }
 
   async setFlow(flow: "paginated" | "scrolled"): Promise<void> {

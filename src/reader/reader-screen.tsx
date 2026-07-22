@@ -73,7 +73,6 @@ export function ReaderScreen({
   const sessionRef = useRef<ReaderSession | null>(null);
   const settingsRef = useRef<StoredSettings>({ ...DEFAULT_SETTINGS });
   const resizeRafRef = useRef<number | null>(null);
-  const flowRef = useRef<StoredSettings["flow"]>("paginated");
 
   const [settings, setSettings] = useState<StoredSettings>({
     ...DEFAULT_SETTINGS,
@@ -102,7 +101,6 @@ export function ReaderScreen({
   // Keep refs in sync for event handlers that close over stale state.
   useEffect(() => {
     settingsRef.current = settings;
-    flowRef.current = settings.flow;
   }, [settings]);
 
   useEffect(() => {
@@ -177,7 +175,6 @@ export function ReaderScreen({
 
       setSettings(loadedSettings);
       settingsRef.current = loadedSettings;
-      flowRef.current = loadedSettings.flow;
 
       session = createSession({
         element: host,
@@ -242,7 +239,8 @@ export function ReaderScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [book.id]);
 
-  // Resize / orientation: coalesce with rAF; capture CFI, reflow, restore.
+  // Resize / orientation: coalesce with rAF and resize the existing rendition.
+  // Rebuilding via setFlow destroys the iframe and can race during window drag.
   useEffect(() => {
     const onResize = () => {
       if (resizeRafRef.current !== null) {
@@ -252,10 +250,7 @@ export function ReaderScreen({
         resizeRafRef.current = null;
         const session = sessionRef.current;
         if (!session) return;
-        const flow = flowRef.current;
-        void session.setFlow(flow).catch(() => {
-          // Non-destructive: keep last CFI; surface via session events.
-        });
+        session.resize();
       });
     };
 
@@ -312,7 +307,6 @@ export function ReaderScreen({
       });
 
       if (next.flow !== prev.flow) {
-        flowRef.current = next.flow;
         try {
           await session.setFlow(next.flow);
         } catch {
