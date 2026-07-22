@@ -13,10 +13,21 @@ Automated matrix on this worktree is the only green claim. **Physical iPhone Saf
 | --- | --- | --- |
 | R1 | JSZip inflate worker may still allocate before consumer stream aborts | Accepted mitigation (consumer mid-stream abort + declared ceilings) |
 | R2 | `createUrl` work cannot be cancelled inside epubjs; we dispose late blobs | Mitigated |
-| R3 | Sanitizer is denylist + CSP, not full allowlist | Open by design for 0.1 |
-| R4 | epubjs 0.3.93 API + xmldom override (not 0.4 major) | Open |
-| R5 | Physical device / live domain | Open |
-| R6 | Exact mid-chapter CFI restore on **mobile** long single-spine chapters is unreliable in epubjs 0.3.93; E2E asserts spine + progress **percent** (±5) there, and **exact CFI** for multi-chapter TOC resume | Documented product/engine limit |
+| R3 | Sanitizer is denylist + CSP, not full allowlist | **Accepted for 0.1** (allowlist deferred) |
+| R4 | epubjs 0.3.93 + `@xmldom/xmldom@0.9.10` override | **Accepted for 0.1** (audit 0); engine major is 0.2+ work |
+| R5 | Physical device / live domain | Open (deploy prerequisite) |
+| R6 | Exact mid-chapter CFI on **mobile** long single-spine | **Accepted limit for 0.1**; E2E: exact CFI multi-chapter; spine+percent mobile long-spine. **Option C (epubjs 0.4) tried and rejected** — see below |
+
+### R6 option C (epubjs 0.4) — tried, not merged
+
+Branch `experiment/epubjs-0.4` / note `docs/experiments/epubjs-0.4-r6.md` (on that branch):
+
+- **0.4.2 is not a drop-in:** `ePub()` is async; Book/Rendition/spine hooks model changed; would require rewriting reader-session + adapter + guards.
+- **Package resolution broken** for modern ESM (`lib/index.js` extensionless imports fail).
+- **Audit regression:** depends on deprecated `xmldom@0.1.x` (critical/moderate); our 0.3.93 + override stays at **0 vulns**.
+- **No evidence** mid-chapter mobile CFI improves (could not complete a clean open/render smoke without a full rewrite).
+
+**Decision:** stay on **0.3.93**. Future R6 work = Locations % resume (option A), not a blind 0.4 bump.
 
 ## Closed in latest pass (must have tests)
 
