@@ -30,14 +30,14 @@
   <ul>
     <li><strong>Window resize:</strong> resizing previously rebuilt the EPUB.js rendition through <code>setFlow()</code>. Several resize events could race destructive iframe rebuilds and leave the chapter blank. Resize is now coalesced by animation frame and delegates to EPUB.js <code>rendition.resize()</code>, preserving the active chapter, CFI, and iframe. Unit, component, and cross-breakpoint browser regressions cover this path.</li>
     <li><strong>iPhone share sheet:</strong> the manifest share target remains enabled for supporting browsers. Safari/WebKit does not implement the Web Share Target API, so a browser-only PWA cannot appear as “Books” in the iPhone share sheet. The current iPhone workflow is Save to Files, open Books, then tap <code>匯入 EPUB</code>. Direct iOS share-sheet integration requires a native app with a Share Extension and is deferred beyond release 0.1.</li>
-    <li><strong>Cloudflare analytics injection:</strong> the live canary detected a zone-level Cloudflare Insights script despite empty Pages analytics fields. Static responses now declare <code>Cache-Control: public, max-age=0, must-revalidate, no-transform</code>, preventing Cloudflare from mutating the privacy-first app HTML. A deployment-config regression requires the opt-out.</li>
+    <li><strong>Cloudflare analytics injection:</strong> the live canary detected a zone-level Cloudflare Insights script despite empty Pages analytics fields. Static responses now declare <code>Cache-Control: public, max-age=0, must-revalidate, no-transform</code>, preventing Cloudflare from mutating the privacy-first app HTML. A deployment-config regression requires the opt-out. The production canary at <a href="https://books.pkwor.com">books.pkwor.com</a> then imported and opened the fixture, retained chapter text through the resize sequence, loaded <code>index-pBJPC5-s.js</code>, and observed zero off-domain requests.</li>
+    <li><strong>Release commits:</strong> resize fix <code>3063ac4</code>; Cloudflare privacy guard <code>a4649a7</code>.</li>
   </ul>
 
   <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>
     <li>Native iOS wrapper and Share Extension, if direct share-sheet import is required.</li>
-    <li>Live domain canary.</li>
     <li>Allowlist sanitizer (optional post-0.1).</li>
     <li>epubjs 0.4 major / maintained fork decision.</li>
   </ol>
