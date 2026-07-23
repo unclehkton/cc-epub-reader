@@ -69,13 +69,17 @@ class SessionOnlyRepository implements LibraryRepository {
     const book: StoredBook = {
       id,
       fileName: input.fileName,
-      byteLength: input.epub.size,
+      byteLength: input.epubBytes?.byteLength ?? input.epub.size,
       epub: input.epub,
       title: input.title,
       savedAt: Date.now(),
     };
     if (input.creator !== undefined) {
       book.creator = input.creator;
+    }
+    // Keep validated ArrayBuffer so open can skip Blob→ArrayBuffer under pressure.
+    if (input.epubBytes) {
+      book.epubBytes = input.epubBytes;
     }
     this.books.set(id, book);
     return book;
@@ -86,6 +90,7 @@ class SessionOnlyRepository implements LibraryRepository {
     this.books.set(book.id, {
       ...book,
       epub: book.epub,
+      ...(book.epubBytes ? { epubBytes: book.epubBytes } : {}),
     });
   }
 
@@ -518,24 +523,59 @@ export function App() {
           return;
         }
 
-        // Re-apply platform assessment here — SW only has a conservative
-        // fallback, and must not be the sole policy gate (iPhone 50 MiB).
+        // Re-apply platform assessment on measured blob size (not metadata alone).
+        // SW only has a conservative fallback and must not be the sole policy gate.
+        const measuredSize =
+          typeof entry.epub?.size === "number" && entry.epub.size > 0
+            ? entry.epub.size
+            : entry.byteLength;
+        if (
+          typeof entry.epub?.size === "number" &&
+          entry.epub.size > 0 &&
+          entry.byteLength > 0 &&
+          entry.epub.size !== entry.byteLength
+        ) {
+          await deleteShareInboxEntry(shareId);
+          if (!cancelled) {
+            setShareError("分享的 EPUB 資料不一致，請改用「匯入 EPUB」。");
+            clearShareImportQuery();
+          }
+          return;
+        }
         const assessment = assessImport(
-          entry.byteLength,
+          measuredSize,
           collectBrowserImportSignals(),
         );
         if (assessment.decision === "block") {
           await deleteShareInboxEntry(shareId);
           if (!cancelled) {
             setShareError(
-              `分享的檔案過大（${formatFileSizeMiB(entry.byteLength)}），無法在此裝置匯入。`,
+              `分享的檔案過大（${formatFileSizeMiB(measuredSize)}），無法在此裝置匯入。`,
             );
             clearShareImportQuery();
           }
           return;
         }
+        if (assessment.decision === "warn") {
+          // Mirror picker: require explicit confirm before large-file validate.
+          const ok =
+            typeof window !== "undefined" &&
+            window.confirm(
+              `分享的 EPUB 較大（${formatFileSizeMiB(measuredSize)}）。\n\n在手機或平板上匯入大型 EPUB 可能使用大量記憶體，導致瀏覽器或閱讀器被系統關閉。建議先關閉其他分頁及應用程式。\n\n按「確定」仍然匯入，按「取消」中止。`,
+            );
+          if (!ok) {
+            await deleteShareInboxEntry(shareId);
+            if (!cancelled) {
+              setShareError("已取消匯入分享的 EPUB。");
+              clearShareImportQuery();
+            }
+            return;
+          }
+        }
 
-        const validated = await validateEpub(entry.epub, entry.fileName);
+        const validated = await validateEpub(entry.epub, entry.fileName, {
+          maxBytes: assessment.blockingThresholdBytes,
+        });
         // Resilient promote: durable first, session-only on quota.
         await repository.promoteShare(shareId, validated, {
           deleteShare: deleteShareInboxEntry,

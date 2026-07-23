@@ -34,6 +34,23 @@ describe("sanitizePackageCss", () => {
     expect(out).toMatch(/text-indent/);
     expect(out).toMatch(/white-space:\s*pre-wrap/);
   });
+
+  it("neutralizes package-relative url() so images cannot auto-fetch", () => {
+    const out = sanitizePackageCss(
+      "div{background:url(../Images/cover.png)} p{color:red}",
+    );
+    expect(out).not.toMatch(/Images\/cover/i);
+    expect(out).toMatch(/about:blank|url\(\s*\)/);
+    expect(out).toMatch(/color:\s*red/);
+  });
+
+  it("allows only blob and safe data urls", () => {
+    const out = sanitizePackageCss(
+      "div{background:url(blob:https://x/1)} span{background:url(data:image/png;base64,aa)}",
+    );
+    expect(out).toMatch(/blob:/);
+    expect(out).toMatch(/data:image\/png/);
+  });
 });
 
 describe("isPackageStylesheetHref", () => {

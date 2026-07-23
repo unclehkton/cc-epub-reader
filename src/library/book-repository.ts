@@ -226,8 +226,9 @@ export class BookRepository {
     const book: StoredBook = {
       id: createId(),
       fileName: input.fileName,
-      byteLength: epub.size,
+      byteLength: epubBytes.byteLength,
       epub,
+      epubBytes,
       title: input.title,
       savedAt: Date.now(),
     };
@@ -341,14 +342,19 @@ export class BookRepository {
       const epubBytes =
         rawEpub instanceof ArrayBuffer ? rawEpub : undefined;
 
-      // Update lastOpenedAt on metadata only — never rewrite the EPUB payload.
+      // Best-effort lastOpenedAt — never fail open because the stamp write failed
+      // (quota / private mode). Payload is already readable.
       meta.lastOpenedAt = Date.now();
-      const writeTx = db.transaction("bookMeta", "readwrite");
-      const writeDone = transactionDone(writeTx);
-      const put = requestToPromise(
-        writeTx.objectStore("bookMeta").put(toPersistedMeta(meta)),
-      );
-      await Promise.all([put, writeDone]);
+      try {
+        const writeTx = db.transaction("bookMeta", "readwrite");
+        const writeDone = transactionDone(writeTx);
+        const put = requestToPromise(
+          writeTx.objectStore("bookMeta").put(toPersistedMeta(meta)),
+        );
+        await Promise.all([put, writeDone]);
+      } catch {
+        // ignore stamp failure
+      }
 
       return epubBytes
         ? { ...meta, epub, epubBytes }
@@ -410,8 +416,9 @@ export class BookRepository {
     const book: StoredBook = {
       id: createId(),
       fileName: validated.fileName,
-      byteLength: epub.size,
+      byteLength: epubBytes.byteLength,
       epub,
+      epubBytes,
       title: validated.title,
       savedAt: Date.now(),
     };
@@ -452,10 +459,22 @@ export class BookRepository {
           fail(tx.error ?? new Error("IndexedDB transaction aborted"));
         };
 
-        const getReq = inboxStore.get(id);
-        getReq.onsuccess = () => {
-          const inbox = parseShareInboxEntry(getReq.result);
-          if (!inbox || inbox.id !== id) {
+        // Existence check only — never materialize the full staged EPUB again
+        // (validated.epubBytes already holds the single validated buffer).
+        const keyReq =
+          typeof inboxStore.getKey === "function"
+            ? inboxStore.getKey(id)
+            : inboxStore.get(id);
+        keyReq.onsuccess = () => {
+          const keyResult = keyReq.result;
+          const exists =
+            keyResult !== undefined &&
+            keyResult !== null &&
+            (typeof keyResult === "string"
+              ? keyResult === id
+              : // Legacy get() path returns the full record.
+                parseShareInboxEntry(keyResult)?.id === id);
+          if (!exists) {
             fail(new Error(`Share inbox entry not found: ${id}`));
             try {
               tx.abort();
@@ -468,8 +487,8 @@ export class BookRepository {
           payloadStore.put(payload);
           inboxStore.delete(id);
         };
-        getReq.onerror = () => {
-          fail(getReq.error ?? new Error("Failed to read share inbox"));
+        keyReq.onerror = () => {
+          fail(keyReq.error ?? new Error("Failed to read share inbox"));
         };
       });
     });

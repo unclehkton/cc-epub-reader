@@ -18,8 +18,9 @@ const FONT_ALGORITHMS = new Set([
   ADOBE_FONT_OBFUSCATION.toLowerCase(),
 ]);
 
+/** True font file extensions only — never substring "font" (bypasses via font-chapter.xhtml). */
 const FONT_EXT = /\.(otf|ttf|woff2?|eot)(\?|#|$)/i;
-const CONTENT_EXT = /\.(x?html?|xml|opf|ncx|nav)(\?|#|$)/i;
+const CONTENT_EXT = /\.(x?html?|xml|opf|ncx|nav|css|js)(\?|#|$)/i;
 const IMAGE_EXT = /\.(jpe?g|png|gif|svg|webp)(\?|#|$)/i;
 
 export type EncryptionClassification =
@@ -62,8 +63,6 @@ function parseEncryptedEntries(text: string): EncryptedEntry[] {
     return entries;
   }
 
-  // Self-closing / truncated stubs: still collect what we can, paired loosely
-  // only when a single method+uri pair is present.
   const algoMatches = [
     ...text.matchAll(/EncryptionMethod[^>]*Algorithm\s*=\s*["']([^"']+)["']/gi),
   ];
@@ -81,8 +80,6 @@ function parseEncryptedEntries(text: string): EncryptedEntry[] {
   if (algoMatches.length === 0 && uriMatches.length === 0) {
     return [];
   }
-  // Multiple unpaired methods — treat each algorithm as its own entry (no URI)
-  // so unknown/content algorithms are not dropped.
   if (algoMatches.length > 0) {
     return algoMatches.map((m) => ({
       algo: (m[1] ?? "").trim().toLowerCase(),
@@ -96,7 +93,8 @@ function parseEncryptedEntries(text: string): EncryptedEntry[] {
 }
 
 function looksLikeFontUri(uri: string): boolean {
-  return FONT_EXT.test(uri) || /font/i.test(uri);
+  // Extension-only. Substring "font" is an intentional bypass hole.
+  return FONT_EXT.test(uri);
 }
 
 /**
@@ -120,41 +118,47 @@ export function classifyEncryptionXml(
 
   const fontPaths: string[] = [];
   let sawContent = false;
-  let sawUnknownAlgo = false;
+  let sawUnknown = false;
   let unknownReason = "unclassified-encryption";
 
   for (const { algo, uri } of entries) {
     const isFontAlgo = Boolean(algo) && FONT_ALGORITHMS.has(algo);
     const looksLikeFont = looksLikeFontUri(uri);
 
-    // Font obfuscation is allowed ONLY when algorithm AND URI both look like fonts.
+    // Empty URI: cannot verify resource type — fail closed (never allow via decoy fonts).
+    if (!uri) {
+      if (isFontAlgo) {
+        sawUnknown = true;
+        unknownReason = "font-algorithm-without-uri";
+      } else if (algo) {
+        sawContent = true;
+        break;
+      } else {
+        sawUnknown = true;
+        unknownReason = "encrypted-data-without-uri";
+      }
+      continue;
+    }
+
+    // Font obfuscation is allowed ONLY when algorithm AND URI are both fonts.
     if (isFontAlgo && looksLikeFont) {
-      if (uri) fontPaths.push(uri);
+      fontPaths.push(uri);
       continue;
     }
 
-    // Font algorithm applied to non-font (e.g. XHTML) — content DRM.
-    if (isFontAlgo && uri && !looksLikeFont) {
-      if (CONTENT_EXT.test(uri) || IMAGE_EXT.test(uri) || !FONT_EXT.test(uri)) {
-        sawContent = true;
-        break;
-      }
+    // Font algorithm on non-font resource (xhtml, css, image, …).
+    if (isFontAlgo && !looksLikeFont) {
+      sawContent = true;
+      break;
     }
 
-    // Font algorithm with empty URI — cannot verify resource type; fail closed.
-    if (isFontAlgo && !uri) {
-      sawUnknownAlgo = true;
-      unknownReason = "font-algorithm-without-uri";
-      continue;
-    }
-
-    // Non-font algorithm on content or images.
+    // Non-font algorithm.
     if (algo && !isFontAlgo) {
-      if (!uri || CONTENT_EXT.test(uri) || IMAGE_EXT.test(uri)) {
+      if (CONTENT_EXT.test(uri) || IMAGE_EXT.test(uri) || !looksLikeFont) {
         sawContent = true;
         break;
       }
-      sawUnknownAlgo = true;
+      sawUnknown = true;
       unknownReason = `unknown-algorithm:${algo}`;
       continue;
     }
@@ -162,7 +166,7 @@ export function classifyEncryptionXml(
     // Missing algorithm
     if (!algo) {
       if (looksLikeFont) {
-        sawUnknownAlgo = true;
+        sawUnknown = true;
         unknownReason = "font-uri-without-algorithm";
       } else {
         sawContent = true;
@@ -175,6 +179,11 @@ export function classifyEncryptionXml(
     return { kind: "content-drm", reason: "encrypted-reading-content" };
   }
 
+  // Any unknown/empty-URI entry blocks even when other fonts are present.
+  if (sawUnknown) {
+    return { kind: "unknown", reason: unknownReason };
+  }
+
   const nonFontAlgos = entries
     .map((e) => e.algo)
     .filter((a) => a && !FONT_ALGORITHMS.has(a));
@@ -185,23 +194,19 @@ export function classifyEncryptionXml(
     };
   }
 
-  if (sawUnknownAlgo && fontPaths.length === 0) {
-    return { kind: "unknown", reason: unknownReason };
-  }
+  // Every entry must be a font-algo + font-extension URI pair.
+  const allFontPairs = entries.every(
+    (e) =>
+      Boolean(e.algo) &&
+      FONT_ALGORITHMS.has(e.algo) &&
+      Boolean(e.uri) &&
+      looksLikeFontUri(e.uri),
+  );
 
-  // All paired entries must be font-obfuscation-only.
-  const allFontPairs = entries.every((e) => {
-    if (!e.algo) return false;
-    if (!FONT_ALGORITHMS.has(e.algo)) return false;
-    return !e.uri || looksLikeFontUri(e.uri);
-  });
-
-  if (allFontPairs && (fontPaths.length > 0 || entries.every((e) => e.algo))) {
+  if (allFontPairs && fontPaths.length > 0) {
     return {
       kind: "font-obfuscation-only",
-      fontPaths: fontPaths.length
-        ? fontPaths
-        : entries.map((e) => e.uri).filter(Boolean),
+      fontPaths,
     };
   }
 

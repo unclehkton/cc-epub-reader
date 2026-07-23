@@ -9,29 +9,33 @@ export const MAX_STYLESHEETS_PER_CHAPTER = 12;
 
 /**
  * Sanitize CSS text for active-chapter injection.
- * Removes @import, neutralizes remote/url schemes, strips expression/behavior.
+ * Removes @import (incl. escaped forms), neutralizes ALL non-blob/data urls
+ * (package-relative images must not auto-fetch before tap-to-reveal), strips
+ * expression/behavior.
  */
 export function sanitizePackageCss(cssText: string): string {
   let css = cssText;
 
-  // Remove @import rules entirely (including url() forms)
+  // Remove @import rules (plain and common CSS escape forms of "import")
   css = css.replace(/@import\s+[^;]+;?/gi, "/* blocked-import */");
+  css = css.replace(/@\\69\s*mport\s+[^;]+;?/gi, "/* blocked-import */");
+  css = css.replace(/@\\49\s*mport\s+[^;]+;?/gi, "/* blocked-import */");
 
-  // Neutralize javascript / vbscript / data in url()
-  css = css.replace(
-    /url\s*\(\s*(['"]?)(\s*(?:javascript|vbscript|data):[^)'"]*)\1\s*\)/gi,
-    "url(about:blank)",
-  );
-
-  // Neutralize http(s) and protocol-relative urls
-  css = css.replace(
-    /url\s*\(\s*(['"]?)\s*(?:https?:)?\/\/[^)'"]*\1\s*\)/gi,
-    "/* blocked-remote-url */",
-  );
-  css = css.replace(
-    /url\s*\(\s*(['"]?)\s*https?:[^)'"]*\1\s*\)/gi,
-    "/* blocked-remote-url */",
-  );
+  // Neutralize every url(...) that is not already blob: or data: (fail closed).
+  // Package-relative url(../Images/x.png) would otherwise decode before reveal.
+  css = css.replace(/url\s*\(\s*(['"]?)([^)'"]*)\1\s*\)/gi, (_full, _q, raw: string) => {
+    const value = String(raw ?? "").trim();
+    if (!value) return "url(about:blank)";
+    const lower = value.toLowerCase();
+    if (lower.startsWith("blob:") || lower.startsWith("data:")) {
+      // data: with scriptable types still blocked
+      if (lower.startsWith("data:text/html") || lower.startsWith("data:image/svg")) {
+        return "url(about:blank)";
+      }
+      return `url(${value})`;
+    }
+    return "url(about:blank)";
+  });
 
   // IE expression / behavior
   css = css.replace(/expression\s*\(/gi, "/*blocked*/(");

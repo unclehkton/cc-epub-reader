@@ -91,4 +91,36 @@ describe("classifyEncryptionXml", () => {
       </EncryptedData>`;
     expect(shouldRejectEncryption(xml)).toBe(true);
   });
+
+  it("rejects font-algorithm + URI that only contains substring 'font'", () => {
+    // Classic bypass: looksLikeFont used /font/i and allowed content paths.
+    const xml = `
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <CipherData><CipherReference URI="OEBPS/Text/font-notes.xhtml"/></CipherData>
+      </EncryptedData>`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("rejects font-algorithm on fonts.css (stylesheet is not a font file)", () => {
+    const xml = `
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${ADOBE_FONT_OBFUSCATION}"/>
+        <CipherData><CipherReference URI="OEBPS/Styles/fonts.css"/></CipherData>
+      </EncryptedData>`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("rejects empty-URI font algorithm even when another font entry exists", () => {
+    const xml = `
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <CipherData><CipherReference URI="OEBPS/Fonts/Body.otf"/></CipherData>
+      </EncryptedData>
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <CipherData></CipherData>
+      </EncryptedData>`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
 });

@@ -442,8 +442,17 @@ describe("ReaderSession generation ownership", () => {
     return openPromise;
   }
 
-  it("when display A then B and A resolves last, only B emits location/status", async () => {
+  it("serializes display A then B so final location and contents match B", async () => {
     const control = createControl();
+    const docA = new DOMParser().parseFromString(
+      "<html><body><p data-ch='1'>A</p></body></html>",
+      "text/html",
+    );
+    const docB = new DOMParser().parseFromString(
+      "<html><body><p data-ch='2'>B</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = docA;
     const { session, events } = mountSession(control);
 
     await openAndResolve(session, control);
@@ -451,46 +460,34 @@ describe("ReaderSession generation ownership", () => {
     events.length = 0;
     control.displayCalls.length = 0;
 
+    // Queue B while A is in-flight — nav mutex must not run B's display until A settles.
     const pA = session.display("ch1.xhtml");
     await waitFor(() => control.displayCalls.length >= 1, "display A");
     const pB = session.display("ch2.xhtml");
-    await waitFor(() => control.displayCalls.length >= 2, "display B");
+    // B must not start until A resolves (true single-flight).
+    expect(control.displayCalls).toHaveLength(1);
 
-    const callA = control.displayCalls[0]!;
-    const callB = control.displayCalls[1]!;
-    expect(callA.target).toBe("ch1.xhtml");
-    expect(callB.target).toBe("ch2.xhtml");
+    control.displayCalls[0]!.deferred.resolve();
+    await pA;
 
-    // Resolve B first, then A (stale).
-    callB.deferred.resolve();
+    await waitFor(() => control.displayCalls.length >= 2, "display B after A");
+    control.contentsDocument = docB;
+    control.displayCalls[1]!.deferred.resolve();
     await pB;
 
-    callA.deferred.resolve();
-    await pA;
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
+    // Contents identity must match published location (not A stuck under B CFI).
+    expect(control.contentsDocument?.querySelector("[data-ch='2']")).toBeTruthy();
 
     const locations = events.filter((e) => e.type === "location") as Array<{
       type: "location";
       location: ReaderLocation;
     }>;
-    const statuses = events.filter((e) => e.type === "status") as Array<{
-      type: "status";
-      status: string;
-    }>;
-
-    // Only chapter B location should be published after the race.
-    expect(locations.length).toBeGreaterThanOrEqual(1);
-    expect(locations.every((e) => e.location.spineHref === "ch2.xhtml")).toBe(
+    expect(locations.some((e) => e.location.spineHref === "ch2.xhtml")).toBe(
       true,
     );
-
-    // Final idle corresponds to B; A must not emit a trailing idle/error after B.
-    const idleEvents = statuses.filter((s) => s.status === "idle");
-    expect(idleEvents.length).toBe(1);
-
-    // No location for ch1 after B started.
-    expect(locations.some((e) => e.location.spineHref === "ch1.xhtml")).toBe(
-      false,
-    );
+    const lastLoc = locations[locations.length - 1];
+    expect(lastLoc?.location.spineHref).toBe("ch2.xhtml");
 
     session.destroy();
   });
@@ -596,6 +593,11 @@ describe("ReaderSession generation ownership", () => {
     // Resize must rebind gates/gestures without calling capture again.
     session.resize();
     await new Promise((r) => setTimeout(r, 120));
+    expect(captureSpy.mock.calls.length).toBe(capturesAfterOpen);
+
+    // Late `rendered` after resize must also not force-recapture (原文 poison).
+    control.emit("rendered");
+    await new Promise((r) => setTimeout(r, 50));
     expect(captureSpy.mock.calls.length).toBe(capturesAfterOpen);
 
     // Failed navigation rebind path also must not recapture.
@@ -997,6 +999,46 @@ describe("ReaderSession generation ownership", () => {
     chapterDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
     expect(events.some((e) => e.type === "content-tap")).toBe(true);
 
+    session.destroy();
+  });
+
+  it("resume approximatePercent uses 0–100 scale for spine index", async () => {
+    const control = createControl();
+    // Three spine items so 33% lands on index 0, 50% on index 1, not last.
+    control.sections = [
+      { href: "ch1.xhtml", index: 0 },
+      { href: "ch2.xhtml", index: 1 },
+      { href: "ch3.xhtml", index: 2 },
+    ];
+    const { session } = mountSession(control);
+    const openPromise = session.open(
+      new Blob(["epub"], { type: "application/epub+zip" }),
+      { approximatePercent: 50 },
+    );
+    // open falls through to percent after first display(undefined) if no cfi.
+    // First display is undefined (openWithResumeFallback), then percent path
+    // may issue another display for ch2.
+    await waitFor(() => control.displayCalls.length >= 1, "open display");
+    // Resolve all pending displays as they appear (percent may add more).
+    for (let i = 0; i < 8; i += 1) {
+      const pending = control.displayCalls.find((c) => {
+        // deferred not yet resolved — resolve all
+        return true;
+      });
+      void pending;
+      for (const call of control.displayCalls) {
+        try {
+          call.deferred.resolve();
+        } catch {
+          // already resolved
+        }
+      }
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await openPromise;
+    // 50% of 3 spines → index floor(0.5*3)=1 → ch2
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
     session.destroy();
   });
 

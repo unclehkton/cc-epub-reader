@@ -19,6 +19,7 @@ import {
   transformChapter,
   type ChapterTransformResult,
 } from "./chapter-transformer";
+import { validateRestorableUrl } from "./archive-url";
 import {
   createArchiveResolver,
   DEFAULT_RENDITION_OPTIONS,
@@ -236,6 +237,11 @@ class ReaderSessionImpl implements ReaderSession {
   private spineCount = 0;
   /** Async open/display/nav/flow ops in flight; suppresses mid-flight relocated noise. */
   private inflightOps = 0;
+  /**
+   * Serialize display/next/prev so concurrent epubjs calls cannot leave the
+   * iframe on chapter A while session location says chapter B.
+   */
+  private navTail: Promise<void> = Promise.resolve();
 
   constructor(options: ReaderSessionOptions) {
     this.element = options.element;
@@ -333,33 +339,35 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   async display(target?: string): Promise<void> {
-    this.assertAlive();
-    const gen = this.beginOp();
-    this.emit({ type: "status", status: "loading" });
-    // Do not teardown before navigation succeeds — a bad TOC href must keep
-    // current-chapter gates/links/conversion alive (same pattern as next/prev).
-    // After success, classify same-spine vs cross-spine: same-Document CFI
-    // jumps must NOT teardown (EPUB.js may reuse the Document and skip rendered).
-    const before = this.snapshotTransition();
-    try {
-      const rendition = this.requireRendition();
-      await rendition.display(target);
-      if (!this.isCurrent(gen)) return;
-      await this.settleAfterNavigation(gen, before);
-      if (!this.isCurrent(gen)) return;
-      this.emit({ type: "status", status: "idle" });
-    } catch (error) {
-      if (!this.isCurrent(gen)) return;
-      await this.rebindCurrentChapter();
-      this.emit({
-        type: "status",
-        status: "error",
-        message: errorMessage(error),
-      });
-      throw error;
-    } finally {
-      this.endOp();
-    }
+    return this.runSerializedNav(async () => {
+      this.assertAlive();
+      const gen = this.beginOp();
+      this.emit({ type: "status", status: "loading" });
+      // Do not teardown before navigation succeeds — a bad TOC href must keep
+      // current-chapter gates/links/conversion alive (same pattern as next/prev).
+      // After success, classify same-spine vs cross-spine: same-Document CFI
+      // jumps must NOT teardown (EPUB.js may reuse the Document and skip rendered).
+      const before = this.snapshotTransition();
+      try {
+        const rendition = this.requireRendition();
+        await rendition.display(target);
+        if (!this.isCurrent(gen)) return;
+        await this.settleAfterNavigation(gen, before);
+        if (!this.isCurrent(gen)) return;
+        this.emit({ type: "status", status: "idle" });
+      } catch (error) {
+        if (!this.isCurrent(gen)) return;
+        await this.rebindCurrentChapter();
+        this.emit({
+          type: "status",
+          status: "error",
+          message: errorMessage(error),
+        });
+        throw error;
+      } finally {
+        this.endOp();
+      }
+    });
   }
 
   async goPrevious(): Promise<void> {
@@ -370,34 +378,50 @@ class ReaderSessionImpl implements ReaderSession {
     await this.navigateAdjacent("next");
   }
 
+  /**
+   * Queue display/next/prev so only one epubjs navigation runs at a time.
+   * Generation still ignores stale completions; the queue prevents the iframe
+   * from applying a superseded display after a newer hop already settled.
+   */
+  private runSerializedNav<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.navTail.then(fn, fn);
+    this.navTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   private async navigateAdjacent(direction: "next" | "prev"): Promise<void> {
-    this.assertAlive();
-    const gen = this.beginOp();
-    this.emit({ type: "status", status: "loading" });
-    const before = this.snapshotTransition();
-    try {
-      const rendition = this.requireRendition();
-      if (direction === "next") {
-        await rendition.next();
-      } else {
-        await rendition.prev();
+    return this.runSerializedNav(async () => {
+      this.assertAlive();
+      const gen = this.beginOp();
+      this.emit({ type: "status", status: "loading" });
+      const before = this.snapshotTransition();
+      try {
+        const rendition = this.requireRendition();
+        if (direction === "next") {
+          await rendition.next();
+        } else {
+          await rendition.prev();
+        }
+        if (!this.isCurrent(gen)) return;
+        await this.settleAfterNavigation(gen, before);
+        if (!this.isCurrent(gen)) return;
+        this.emit({ type: "status", status: "idle" });
+      } catch (error) {
+        if (!this.isCurrent(gen)) return;
+        await this.rebindCurrentChapter();
+        this.emit({
+          type: "status",
+          status: "error",
+          message: errorMessage(error),
+        });
+        throw error;
+      } finally {
+        this.endOp();
       }
-      if (!this.isCurrent(gen)) return;
-      await this.settleAfterNavigation(gen, before);
-      if (!this.isCurrent(gen)) return;
-      this.emit({ type: "status", status: "idle" });
-    } catch (error) {
-      if (!this.isCurrent(gen)) return;
-      await this.rebindCurrentChapter();
-      this.emit({
-        type: "status",
-        status: "error",
-        message: errorMessage(error),
-      });
-      throw error;
-    } finally {
-      this.endOp();
-    }
+    });
   }
 
   /**
@@ -413,9 +437,19 @@ class ReaderSessionImpl implements ReaderSession {
     if (!this.isCurrent(gen)) return;
 
     // Prefer relocated/reportLocation after the navigation promise settles.
-    const nextLoc =
-      (await this.awaitMeaningfulLocation(gen, before.location, 600)) ??
-      (await this.readLocationFromRenditionGuarded(gen));
+    // Only accept a location that meaningfully advanced when we already had one;
+    // stale rendition.location must not classify a Document swap as same-spine.
+    let nextLoc = await this.awaitMeaningfulLocation(gen, before.location, 600);
+    if (!nextLoc) {
+      const mapped = await this.readLocationFromRenditionGuarded(gen);
+      if (
+        mapped &&
+        (!before.location ||
+          locationMeaningfullyChanged(before.location, mapped))
+      ) {
+        nextLoc = mapped;
+      }
+    }
     if (!this.isCurrent(gen)) return;
     if (nextLoc) {
       this.location = nextLoc;
@@ -425,19 +459,40 @@ class ReaderSessionImpl implements ReaderSession {
     const afterDoc =
       readContentsDocument(this.rendition) ||
       readIframeDocument(this.element);
-    const after: TransitionSnapshot = {
+    // Document identity changed without a location update → treat as chapter
+    // replacement (cross-spine or engine rebuild), never same-spine-replaced
+    // with a stale spine index.
+    let kind = classifyTransition(before, {
       location: nextLoc ?? this.location,
       document: afterDoc,
       renderEpoch: this.renderEpoch,
       cfi: nextLoc?.cfi ?? this.location?.cfi,
       spineIndex: nextLoc?.spineIndex ?? this.location?.spineIndex,
       spineHref: nextLoc?.spineHref ?? this.location?.spineHref,
-    };
-    const kind = classifyTransition(before, after);
+    });
+    if (
+      kind !== "cross-spine" &&
+      before.document &&
+      afterDoc &&
+      afterDoc !== before.document &&
+      before.location &&
+      !nextLoc
+    ) {
+      kind = "cross-spine";
+    }
 
     if (kind === "same-spine-same-document") {
       // Keep converter baseline, revealed images, and chapter URLs.
+      // Already bound to this Document with a capture: only refresh overlays —
+      // do not dispose gates or re-run OpenCC on every in-chapter page turn.
       if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
+        if (
+          this.lastBoundDocument === afterDoc &&
+          this.converter.hasCaptureFor(afterDoc)
+        ) {
+          this.repositionParentOverlays();
+          return;
+        }
         this.lastBoundDocument = afterDoc;
         this.bindLiveChapterDocument(afterDoc, { skipCssInject: false });
         if (!this.converter.hasCaptureFor(afterDoc)) {
@@ -571,10 +626,19 @@ class ReaderSessionImpl implements ReaderSession {
 
       setTimeout(() => {
         if (settled) return;
-        // Bounded fallback: accept current mapped location even if unchanged
-        // (start/end of book).
+        // Bounded fallback: only accept a location that actually changed.
+        // Unchanged after intentional nav must not classify as no-transition
+        // success with a stale spine (skips teardown / wrong progress).
         void this.readLocationFromRendition().then((mapped) => {
-          finish(this.isCurrent(gen) ? mapped : null);
+          if (!this.isCurrent(gen) || this.rendition !== rendition) {
+            finish(null);
+            return;
+          }
+          if (mapped && locationMeaningfullyChanged(prev, mapped)) {
+            finish(mapped);
+            return;
+          }
+          finish(null);
         });
       }, timeoutMs);
     });
@@ -612,7 +676,35 @@ class ReaderSessionImpl implements ReaderSession {
         if (!this.isCurrent(gen)) throw staleError();
         return;
       } catch {
-        // Fall through to first spine item.
+        // Fall through to percent / first spine item.
+      }
+    }
+
+    // Approximate percent → spine index when CFI/href failed or were absent.
+    // Progress is stored as 0–100 (see mapLocation / StoredProgress).
+    const pct = resume.approximatePercent;
+    if (
+      typeof pct === "number" &&
+      Number.isFinite(pct) &&
+      this.spineCount > 0 &&
+      this.book
+    ) {
+      const fraction = Math.min(100, Math.max(0, pct)) / 100;
+      const index = Math.min(
+        this.spineCount - 1,
+        Math.max(0, Math.floor(fraction * this.spineCount)),
+      );
+      const section = this.book.spine?.get?.(index);
+      const sectionHref =
+        section && typeof section.href === "string" ? section.href : undefined;
+      if (sectionHref) {
+        try {
+          await this.displayInternal(sectionHref, gen);
+          if (!this.isCurrent(gen)) throw staleError();
+          return;
+        } catch {
+          // Fall through to first spine item.
+        }
       }
     }
 
@@ -633,35 +725,56 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   async setFlow(flow: "paginated" | "scrolled"): Promise<void> {
-    this.assertAlive();
-    const gen = this.beginOp();
-    this.flow = flow;
-    this.emit({ type: "status", status: "loading" });
+    // Same queue as display/next/prev — must not detachRendition under an
+    // in-flight page turn.
+    return this.runSerializedNav(async () => {
+      this.assertAlive();
+      const gen = this.beginOp();
+      this.flow = flow;
+      this.emit({ type: "status", status: "loading" });
 
-    try {
-      const cfi = this.location?.cfi;
-      const book = this.requireBook();
+      try {
+        const cfi = this.location?.cfi;
+        const spineHref = this.location?.spineHref;
+        const book = this.requireBook();
 
-      this.detachRendition();
-      this.teardownChapter();
-      this.rendition = this.createRendition(book);
-      this.wireRendition(this.rendition);
-      this.applyAppearance(this.appearance);
+        this.detachRendition();
+        this.teardownChapter();
+        this.rendition = this.createRendition(book);
+        this.wireRendition(this.rendition);
+        this.applyAppearance(this.appearance);
 
-      await this.displayInternal(cfi, gen);
-      if (!this.isCurrent(gen)) return;
-      this.emit({ type: "status", status: "idle" });
-    } catch (error) {
-      if (!this.isCurrent(gen)) return;
-      this.emit({
-        type: "status",
-        status: "error",
-        message: errorMessage(error),
-      });
-      throw error;
-    } finally {
-      this.endOp();
-    }
+        try {
+          await this.displayInternal(cfi, gen);
+        } catch {
+          // Bad CFI after flow switch must not leave a blank stage with no gates.
+          if (!this.isCurrent(gen)) return;
+          try {
+            await this.displayInternal(spineHref, gen);
+          } catch {
+            if (!this.isCurrent(gen)) return;
+            await this.displayInternal(undefined, gen);
+          }
+        }
+        if (!this.isCurrent(gen)) return;
+        this.emit({ type: "status", status: "idle" });
+      } catch (error) {
+        if (!this.isCurrent(gen)) return;
+        try {
+          await this.rebindCurrentChapter();
+        } catch {
+          // ignore
+        }
+        this.emit({
+          type: "status",
+          status: "error",
+          message: errorMessage(error),
+        });
+        throw error;
+      } finally {
+        this.endOp();
+      }
+    });
   }
 
   async setConversion(mode: ConversionMode): Promise<void> {
@@ -827,6 +940,9 @@ class ReaderSessionImpl implements ReaderSession {
       if (this.destroyed || token !== this.resizeToken || this.inflightOps > 0) {
         return;
       }
+      // Successful rebind owns the chapter — clear late arm so a later
+      // `rendered` cannot forceCapture and poison converted 原文 baselines.
+      this.pendingLateChapterRebindGen = null;
       this.repositionParentOverlays();
     } catch {
       // best-effort geometry repair
@@ -925,8 +1041,11 @@ class ReaderSessionImpl implements ReaderSession {
       return;
     }
     this.pendingLateChapterRebindGen = null;
-    // New document path: must capture originals from the real chapter text.
-    await this.settleChapterDocument(candidate, gen, { forceCapture: true });
+    // Late repair after resize/render: never force-recapture. Converted text on
+    // screen would become the new “original” and 原文 could never restore.
+    await this.settleChapterDocument(candidate, gen, {
+      forceCapture: !this.converter.hasCaptureFor(candidate),
+    });
     if (!this.isCurrent(gen)) return;
     await this.syncLocationFromRenditionAsync();
   }
@@ -1462,14 +1581,54 @@ class ReaderSessionImpl implements ReaderSession {
         event.preventDefault();
         event.stopPropagation();
         void (async () => {
-          const path = pair.img.getAttribute("data-epub-src");
-          if (!path) return;
-          const url = await materialize(path);
+          // Match in-frame reveal: validate stored path before materialize.
+          const path = validateRestorableUrl(
+            pair.img.getAttribute("data-epub-src"),
+          );
+          if (!path) {
+            button.textContent = "圖片載入失敗，點擊重試";
+            button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
+            return;
+          }
+          let url: string | null =
+            path.startsWith("blob:") || path.startsWith("data:") ? path : null;
+          if (!url) {
+            url = await materialize(path);
+          }
           if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
             button.textContent = "圖片載入失敗，點擊重試";
+            button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
             return;
           }
           pair.img.setAttribute("src", url);
+          // Best-effort srcset (WebKit parent path previously ignored it).
+          const srcset = pair.img.getAttribute("data-epub-srcset");
+          if (srcset) {
+            const parts = srcset.split(",");
+            const out: string[] = [];
+            for (const part of parts) {
+              const trimmed = part.trim();
+              const tokens = trimmed.split(/\s+/);
+              const rawUrl = validateRestorableUrl(tokens[0]);
+              if (!rawUrl) continue;
+              let resolved: string | null =
+                rawUrl.startsWith("blob:") || rawUrl.startsWith("data:")
+                  ? rawUrl
+                  : null;
+              if (!resolved) {
+                const m = await materialize(rawUrl);
+                if (m && (m.startsWith("blob:") || m.startsWith("data:"))) {
+                  resolved = m;
+                }
+              }
+              if (!resolved) continue;
+              const descriptors = tokens.slice(1).join(" ");
+              out.push(descriptors ? `${resolved} ${descriptors}` : resolved);
+            }
+            if (out.length > 0) {
+              pair.img.setAttribute("srcset", out.join(", "));
+            }
+          }
           if (pair.inFrameButton !== pair.img) {
             pair.inFrameButton.hidden = true;
           }

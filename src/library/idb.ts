@@ -151,21 +151,31 @@ export function openDatabaseWithTimeout(ms: number): Promise<IDBDatabase> {
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const open = openDatabase().then((db) => {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
-    if (timedOut) {
-      try {
-        db.close();
-      } catch {
-        // ignore
+  const open = openDatabase()
+    .then((db) => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
       }
-      throw new Error("IndexedDB open completed after timeout");
-    }
-    return db;
-  });
+      if (timedOut) {
+        try {
+          db.close();
+        } catch {
+          // ignore
+        }
+        // Do not throw after timeout won the race — that becomes an unhandled
+        // rejection. Swallow; the race already rejected.
+        return null;
+      }
+      return db;
+    })
+    .catch((error) => {
+      if (timedOut) {
+        // Late failure after timeout — swallow to avoid unhandled rejection.
+        return null;
+      }
+      throw error;
+    });
 
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -175,5 +185,10 @@ export function openDatabaseWithTimeout(ms: number): Promise<IDBDatabase> {
     }, ms);
   });
 
-  return Promise.race([open, timeout]);
+  return Promise.race([open, timeout]).then((db) => {
+    if (!db) {
+      throw new Error("IndexedDB open timed out");
+    }
+    return db;
+  });
 }

@@ -280,7 +280,8 @@ function packageSignalsEncryption(opfXml: string): boolean {
 
 /**
  * Validate a local EPUB envelope and extract package metadata.
- * Returns the original Blob (no second full copy). Uses JSZip only — no EPUB.js
+ * Performs one full-file `arrayBuffer()` read and returns it as `epubBytes`
+ * (plus a Blob wrapper for API compatibility). Uses JSZip only — no EPUB.js
  * on the import path (keeps the library shell lean and WebKit-compatible).
  */
 export async function validateEpub(
@@ -297,7 +298,8 @@ export async function validateEpub(
     options.maxEntryUncompressedBytes ?? MAX_ENTRY_UNCOMPRESSED_BYTES;
   const maxTotalBytes =
     options.maxTotalUncompressedBytes ?? MAX_TOTAL_UNCOMPRESSED_BYTES;
-  if (file.size > maxBytes) {
+  // Match assessImport: block at threshold (inclusive), not only above it.
+  if (file.size >= maxBytes) {
     fail("too-large");
   }
 
