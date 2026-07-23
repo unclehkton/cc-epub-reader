@@ -56,6 +56,8 @@ export interface AppearanceSettings {
   fontFamily: "book" | "sans" | "system";
   background: "rice" | "white" | "sepia";
   theme: "system" | "day" | "night";
+  /** Horizontal margin percent of stage width (0–20). */
+  horizontalMarginPercent?: number;
 }
 
 export type ReaderEvent =
@@ -150,6 +152,8 @@ class ReaderSessionImpl implements ReaderSession {
   private book: AdaptedBook | null = null;
   private rendition: AdaptedRendition | null = null;
   private generation = 0;
+  /** Separate from navigation generation so OpenCC never aborts page turns. */
+  private conversionGeneration = 0;
   private destroyed = false;
   private location: ReaderLocation | null = null;
   private conversion: ConversionMode;
@@ -336,15 +340,18 @@ class ReaderSessionImpl implements ReaderSession {
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
     try {
-      this.teardownChapter();
+      // Teardown only after navigation succeeds so a failed prev() keeps
+      // current-chapter gates/links/conversion alive.
       const rendition = this.requireRendition();
       await rendition.prev();
       if (!this.isCurrent(gen)) return;
+      this.teardownChapter();
       await this.afterChapterSettled(gen);
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
       if (!this.isCurrent(gen)) return;
+      await this.rebindCurrentChapter();
       this.emit({
         type: "status",
         status: "error",
@@ -361,15 +368,16 @@ class ReaderSessionImpl implements ReaderSession {
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
     try {
-      this.teardownChapter();
       const rendition = this.requireRendition();
       await rendition.next();
       if (!this.isCurrent(gen)) return;
+      this.teardownChapter();
       await this.afterChapterSettled(gen);
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
       if (!this.isCurrent(gen)) return;
+      await this.rebindCurrentChapter();
       this.emit({
         type: "status",
         status: "error",
@@ -383,7 +391,26 @@ class ReaderSessionImpl implements ReaderSession {
 
   resize(): void {
     this.assertAlive();
+    // Rebuild the current page after geometry change; bare resize() can leave
+    // a blank iframe while dragging the browser window.
+    const cfi = this.location?.cfi;
     this.rendition?.resize?.();
+    void (async () => {
+      const gen = this.beginOp();
+      try {
+        await waitMs(80);
+        if (!this.isCurrent(gen)) return;
+        await this.displayInternal(cfi, gen);
+        if (!this.isCurrent(gen)) return;
+        this.emit({ type: "status", status: "idle" });
+      } catch {
+        if (this.isCurrent(gen)) {
+          await this.rebindCurrentChapter();
+        }
+      } finally {
+        this.endOp();
+      }
+    })();
   }
 
   async setFlow(flow: "paginated" | "scrolled"): Promise<void> {
@@ -420,20 +447,21 @@ class ReaderSessionImpl implements ReaderSession {
 
   async setConversion(mode: ConversionMode): Promise<void> {
     this.assertAlive();
-    const gen = this.beginOp();
+    // Conversion must not bump navigation generation — doing so aborts
+    // in-flight next/prev/display before afterChapterSettled rebinds gates.
     this.conversion = mode;
+    this.conversionGeneration += 1;
+    const convGen = this.conversionGeneration;
     try {
-      await this.converter.apply(mode, gen);
-      if (!this.isCurrent(gen)) return;
+      await this.converter.apply(mode, convGen);
+      if (this.destroyed || convGen !== this.conversionGeneration) return;
     } catch (error) {
-      if (!this.isCurrent(gen)) return;
+      if (this.destroyed || convGen !== this.conversionGeneration) return;
       this.emit({
         type: "conversion-error",
         message: errorMessage(error),
       });
       throw error;
-    } finally {
-      this.endOp();
     }
   }
 
@@ -450,6 +478,11 @@ class ReaderSessionImpl implements ReaderSession {
         ? themeColors.background
         : BACKGROUNDS[settings.background];
     const color = themeColors.color;
+    const marginPercent = Math.max(
+      0,
+      Math.min(20, Math.round(settings.horizontalMarginPercent ?? 4)),
+    );
+    const margin = `${marginPercent}%`;
 
     try {
       rendition.themes.fontSize(`${settings.fontSizePercent}%`);
@@ -457,8 +490,17 @@ class ReaderSessionImpl implements ReaderSession {
       rendition.themes.override("color", color, true);
       rendition.themes.override("background-color", background, true);
       rendition.themes.override("background", background, true);
+      rendition.themes.override("padding-left", margin, true);
+      rendition.themes.override("padding-right", margin, true);
     } catch {
       // Themes may be unavailable before first render; settings are retained.
+    }
+
+    // Mirror margin on the host for chrome/CSS consumers.
+    try {
+      this.element.style.setProperty("--reader-h-margin", margin);
+    } catch {
+      // ignore
     }
   }
 
@@ -496,13 +538,14 @@ class ReaderSessionImpl implements ReaderSession {
   private async afterChapterSettled(gen: number): Promise<void> {
     if (!this.isCurrent(gen)) return;
 
-    // WebKit may expose contents a tick after display() resolves; poll briefly.
+    // Do not treat bare <body> as ready — empty iframe shells always have body.
     let doc: Document | null = null;
-    for (let attempt = 0; attempt < 15; attempt += 1) {
-      doc =
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      const candidate =
         readContentsDocument(this.rendition) ||
         readIframeDocument(this.element);
-      if (doc?.querySelector("button, img, body")) {
+      if (isChapterDocumentReady(candidate, this.rendition)) {
+        doc = candidate;
         break;
       }
       await waitMs(40);
@@ -514,7 +557,10 @@ class ReaderSessionImpl implements ReaderSession {
 
       this.converter.capture(doc);
       try {
-        await this.converter.apply(this.conversion, gen);
+        // Use conversion generation so apply is not tied to nav gen races.
+        this.conversionGeneration += 1;
+        const convGen = this.conversionGeneration;
+        await this.converter.apply(this.conversion, convGen);
       } catch (error) {
         if (!this.isCurrent(gen)) return;
         this.emit({
@@ -529,6 +575,23 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (!this.isCurrent(gen)) return;
+    this.syncLocationFromRendition();
+  }
+
+  /** Re-attach gates/links/converter capture for the still-visible chapter. */
+  private async rebindCurrentChapter(): Promise<void> {
+    const doc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    if (!doc || !isChapterDocumentReady(doc, this.rendition)) return;
+    this.bindLiveChapterDocument(doc);
+    this.converter.capture(doc);
+    try {
+      this.conversionGeneration += 1;
+      await this.converter.apply(this.conversion, this.conversionGeneration);
+    } catch {
+      // best-effort
+    }
     this.syncLocationFromRendition();
   }
 
@@ -619,12 +682,27 @@ class ReaderSessionImpl implements ReaderSession {
           // Do NOT park at stage corner — that produced a floating gate on
           // every section when images were off-page or not laid out yet.
           this.hideParentOverlayButton(pair.button);
+          // Ensure in-frame button remains tappable as fallback.
+          try {
+            pair.inFrameButton.hidden = false;
+            pair.inFrameButton.style.pointerEvents = "auto";
+            pair.inFrameButton.style.opacity = "1";
+          } catch {
+            // ignore
+          }
           continue;
         }
         const left = iframeRect.left + rect.left;
         const top = iframeRect.top + rect.top - 48;
         pair.button.hidden = false;
         this.showParentOverlayButton(pair.button, left, top);
+        // Prefer parent hit target when visible to avoid double activation.
+        try {
+          pair.inFrameButton.style.pointerEvents = "none";
+          pair.inFrameButton.style.opacity = "0.01";
+        } catch {
+          // ignore
+        }
       } catch {
         this.hideParentOverlayButton(pair.button);
       }
@@ -820,11 +898,11 @@ class ReaderSessionImpl implements ReaderSession {
       }
       const inFrameButton = prev as HTMLElement;
       candidates.push({ img, inFrameButton });
-      // Prefer parent control for activation. Hide the in-chapter control so we
-      // do not stack two "點擊顯示圖片" labels (parent + ghost/in-frame).
-      inFrameButton.setAttribute("aria-hidden", "true");
-      inFrameButton.hidden = true;
-      inFrameButton.style.pointerEvents = "none";
+      // Keep in-frame control as fallback when parent overlay is off-viewport.
+      inFrameButton.setAttribute("aria-hidden", "false");
+      inFrameButton.hidden = false;
+      inFrameButton.style.pointerEvents = "auto";
+      inFrameButton.style.opacity = "1";
     }
 
     if (candidates.length === 0) {
@@ -1316,6 +1394,32 @@ function readContentsDocument(
     return null;
   }
   return null;
+}
+
+/** True when the document has real chapter content, not an empty iframe shell. */
+function isChapterDocumentReady(
+  doc: Document | null | undefined,
+  rendition: AdaptedRendition | null,
+): boolean {
+  if (!doc?.body) return false;
+  if (doc.body.childNodes.length === 0) return false;
+  const fromRendition = readContentsDocument(rendition);
+  if (fromRendition && fromRendition !== doc) {
+    // Prefer the live contents document when available.
+    if (fromRendition.body && fromRendition.body.childNodes.length > 0) {
+      return false;
+    }
+  }
+  const hasElement = Boolean(
+    doc.body.querySelector(
+      "p, h1, h2, h3, h4, h5, h6, div, section, article, img, svg, span, a, li, blockquote",
+    ),
+  );
+  if (hasElement) return true;
+  return Array.from(doc.body.childNodes).some(
+    (node) =>
+      node.nodeType === 3 && Boolean(node.textContent && node.textContent.trim()),
+  );
 }
 
 function readIframeDocument(host: HTMLElement | null): Document | null {

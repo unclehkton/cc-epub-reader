@@ -496,4 +496,59 @@ describe("ReaderSession generation ownership", () => {
       events.filter((e) => e.type === "conversion-error"),
     ).toHaveLength(0);
   });
+
+  it("conversion mid-flight does not abort goNext chapter settlement", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    events.length = 0;
+
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next call");
+
+    // Conversion must not bump navigation generation.
+    await session.setConversion("simplified").catch(() => {
+      // converter may no-op without captured nodes
+    });
+
+    control.nextCalls[0]!.resolve();
+    await nextPromise;
+
+    const statuses = events.filter((e) => e.type === "status") as Array<{
+      type: "status";
+      status: string;
+    }>;
+    expect(statuses.some((s) => s.status === "idle")).toBe(true);
+    expect(statuses.some((s) => s.status === "error")).toBe(false);
+
+    session.destroy();
+  });
+
+  it("failed goNext rebinds without leaving permanent error when prev succeeds", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    events.length = 0;
+
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next call");
+    control.nextCalls[0]!.reject(new Error("at end"));
+    await expect(nextPromise).rejects.toThrow(/at end/);
+
+    // Still idle-capable after rebind path: another prev should work.
+    const prevPromise = session.goPrevious();
+    await waitFor(() => control.prevCalls.length >= 1, "prev call");
+    control.prevCalls[0]!.resolve();
+    await prevPromise;
+
+    const errors = events.filter(
+      (e) => e.type === "status" && e.status === "error",
+    );
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(
+      events.some((e) => e.type === "status" && e.status === "idle"),
+    ).toBe(true);
+
+    session.destroy();
+  });
 });

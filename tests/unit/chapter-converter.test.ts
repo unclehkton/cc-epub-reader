@@ -32,12 +32,14 @@ describe("opencc-profiles", () => {
     expect(PROFILE_OPTIONS.traditional).toEqual({ from: "cn", to: "t" });
     expect(PROFILE_OPTIONS["hong-kong"]).toEqual({ from: "cn", to: "hk" });
     expect(PROFILE_OPTIONS.taiwan).toEqual({ from: "cn", to: "twp" });
+    expect(PROFILE_OPTIONS.simplified).toEqual({ from: "t", to: "cn" });
   });
 
-  it("lazy-loads converters that perform s2t / s2hk / s2twp", async () => {
+  it("lazy-loads converters that perform s2t / s2hk / s2twp / t2s", async () => {
     const traditional = await loadConverter("traditional");
     const hongKong = await loadConverter("hong-kong");
     const taiwan = await loadConverter("taiwan");
+    const simplified = await loadConverter("simplified");
 
     expect(traditional("汉语")).toBe("漢語");
     expect(hongKong("汉语")).toBe("漢語");
@@ -45,6 +47,9 @@ describe("opencc-profiles", () => {
 
     // Taiwan phrase path (s2twp): 软件→軟體, 鼠标→滑鼠
     expect(taiwan("软件鼠标")).toBe("軟體滑鼠");
+
+    // Traditional → Simplified
+    expect(simplified("漢語")).toBe("汉语");
   });
 });
 

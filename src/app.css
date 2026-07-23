@@ -23,21 +23,33 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Avoid accidental double-tap zoom on chrome; pinch zoom still allowed by browser policy. */
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--rice);
   color: var(--ink);
+  /* Prevent rubber-band overscroll from feeling like a zoomed PWA shell. */
+  overscroll-behavior: none;
 }
 
 button {
   font: inherit;
   color: inherit;
+  touch-action: manipulation;
 }
 
 .touch-target {
   min-width: 44px;
   min-height: 44px;
+  touch-action: manipulation;
 }
 
 .library-screen {
@@ -344,6 +356,7 @@ button {
 
 .reader-topbar,
 .reader-bottombar {
+  touch-action: manipulation;
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -478,6 +491,8 @@ button {
   height: 100%;
   background: var(--reader-surface);
   /* EPUB.js mounts iframe children here */
+  /* Allow horizontal swipe paging; avoid double-tap zoom on the stage. */
+  touch-action: pan-y manipulation;
 }
 
 .reader-host > * {
@@ -573,21 +588,49 @@ button {
   position: fixed;
   top: 0;
   bottom: 0;
-  left: 0;
   width: min(20rem, 88vw);
-  box-shadow: 8px 0 28px var(--reader-shadow);
-  border-right: 1px solid var(--reader-border);
   padding-top: env(safe-area-inset-top, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
   transform: translateX(0);
+}
+
+.toc-drawer--overlay.toc-drawer--left {
+  left: 0;
+  right: auto;
+  box-shadow: 8px 0 28px var(--reader-shadow);
+  border-right: 1px solid var(--reader-border);
+}
+
+.toc-drawer--overlay.toc-drawer--right {
+  right: 0;
+  left: auto;
+  box-shadow: -8px 0 28px var(--reader-shadow);
+  border-left: 1px solid var(--reader-border);
 }
 
 .toc-drawer--side {
   position: relative;
   width: 16rem;
   flex: 0 0 16rem;
-  border-right: 1px solid var(--reader-border);
   z-index: 2;
+}
+
+.toc-drawer--side.toc-drawer--left {
+  border-right: 1px solid var(--reader-border);
+  order: 0;
+}
+
+.toc-drawer--side.toc-drawer--right {
+  border-left: 1px solid var(--reader-border);
+  order: 2;
+}
+
+.reader-body--toc-right {
+  flex-direction: row;
+}
+
+.reader-body--toc-right .reader-stage {
+  order: 1;
 }
 
 .toc-drawer-header {
@@ -737,6 +780,91 @@ button {
   margin: 0.5rem 0 0;
   color: var(--reader-danger);
   font-size: 0.9rem;
+}
+
+.settings-link-chip {
+  width: 100%;
+  justify-content: center;
+}
+
+.library-footer {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
+}
+
+.library-licenses-link {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.license-notice-root {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.license-notice-panel {
+  position: relative;
+  z-index: 41;
+  width: min(40rem, 100vw);
+  max-height: min(88vh, 40rem);
+  overflow: auto;
+  background: var(--paper, #fffdf7);
+  color: var(--ink);
+  border-radius: 1rem 1rem 0 0;
+  border: 1px solid var(--border);
+  box-shadow: 0 -8px 32px var(--shadow);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.license-notice-body {
+  padding: 0 1rem 1.25rem;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.license-entry {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.license-entry-title {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  color: var(--jade-deep);
+}
+
+.license-entry-version {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.license-entry-meta,
+.license-entry-notice {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.reader-screen .license-notice-panel {
+  background: var(--reader-chrome, #fffdf7);
+  color: var(--reader-ink, #18342d);
+  border-color: var(--reader-border, #d9d4c4);
+}
+
+.reader-screen .license-entry-title {
+  color: var(--reader-jade-deep, #16463b);
 }
 
 @media (min-width: 900px) {

@@ -4,8 +4,15 @@ import type {
   LibraryBook,
   StoredBook,
   StoredProgress,
+  UiLanguage,
   ValidatedImport,
 } from "../domain/types";
+import {
+  DEFAULT_SETTINGS,
+  type SettingsRepositoryLike,
+} from "../settings/settings-repository";
+import { LicenseNotice } from "../ui/license-notice";
+import { t } from "../ui/strings";
 import { BookRow } from "./book-row";
 import { DeleteDialog } from "./delete-dialog";
 import { isImportError } from "./import-errors";
@@ -31,6 +38,8 @@ export interface LibraryScreenProps {
   /** When true, imports stay in-session only (IndexedDB unavailable). */
   sessionOnly?: boolean;
   sessionOnlyMessage?: string | null;
+  /** Optional settings repo for chrome language + license entry. */
+  settingsRepository?: SettingsRepositoryLike;
 }
 
 interface PendingDelete {
@@ -54,6 +63,7 @@ export function LibraryScreen({
   onOpenBook,
   sessionOnly = false,
   sessionOnlyMessage = null,
+  settingsRepository,
 }: LibraryScreenProps) {
   const [books, setBooks] = useState<LibraryBook[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,7 +73,24 @@ export function LibraryScreen({
     null,
   );
   const [hasRequestedPersist, setHasRequestedPersist] = useState(false);
+  const [licensesOpen, setLicensesOpen] = useState(false);
+  const [uiLanguage, setUiLanguage] = useState<UiLanguage>(
+    DEFAULT_SETTINGS.uiLanguage ?? "zh-Hant",
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!settingsRepository) return;
+    let cancelled = false;
+    void settingsRepository.get().then((settings) => {
+      if (!cancelled) {
+        setUiLanguage(settings.uiLanguage ?? "zh-Hant");
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsRepository]);
 
   const refresh = useCallback(async () => {
     const rows = await repository.listBooks();
@@ -156,22 +183,27 @@ export function LibraryScreen({
   };
 
   const bookCountLabel =
-    books.length === 0 ? "尚未匯入書籍" : `${books.length} 本書`;
+    books.length === 0
+      ? uiLanguage === "zh-Hans"
+        ? "尚未导入书籍"
+        : "尚未匯入書籍"
+      : uiLanguage === "zh-Hans"
+        ? `${books.length} 本书`
+        : `${books.length} 本書`;
 
   return (
     <main class="library-screen">
       <header class="library-header">
-        <h1>你的書庫</h1>
-        <p class="library-privacy">書籍只會儲存在此裝置</p>
+        <h1>{t(uiLanguage, "libraryTitle")}</h1>
+        <p class="library-privacy">{t(uiLanguage, "libraryPrivacy")}</p>
         <StorageNotice />
         {sessionOnly || sessionOnlyMessage ? (
           <p class="library-session-only" role="status">
-            {sessionOnlyMessage ??
-              "目前無法使用持久儲存，書籍與進度只會保留在這個瀏覽階段，重新載入後會消失。"}
+            {sessionOnlyMessage ?? t(uiLanguage, "sessionOnlyDefault")}
           </p>
         ) : null}
         <p class="library-count" aria-live="polite">
-          {loading ? "載入中…" : bookCountLabel}
+          {loading ? t(uiLanguage, "loading") : bookCountLabel}
         </p>
         <button
           type="button"
@@ -180,7 +212,7 @@ export function LibraryScreen({
           onClick={handleImportClick}
           disabled={importing}
         >
-          匯入 EPUB
+          {t(uiLanguage, "importEpub")}
         </button>
         <input
           ref={fileInputRef}
@@ -197,7 +229,7 @@ export function LibraryScreen({
         </p>
       ) : null}
 
-      <ul class="book-list" aria-label="書單">
+      <ul class="book-list" aria-label={uiLanguage === "zh-Hans" ? "书单" : "書單"}>
         {books.map((entry) => (
           <BookRow
             key={entry.book.id}
@@ -216,6 +248,19 @@ export function LibraryScreen({
         ))}
       </ul>
 
+      <footer class="library-footer">
+        <button
+          type="button"
+          class="library-licenses-link touch-target"
+          style={{ minWidth: "44px", minHeight: "44px" }}
+          onClick={() => {
+            setLicensesOpen(true);
+          }}
+        >
+          {t(uiLanguage, "licenses")}
+        </button>
+      </footer>
+
       {pendingDelete ? (
         <DeleteDialog
           bookTitle={pendingDelete.book.title}
@@ -225,6 +270,14 @@ export function LibraryScreen({
           onCancel={handleCancelDelete}
         />
       ) : null}
+
+      <LicenseNotice
+        open={licensesOpen}
+        uiLanguage={uiLanguage}
+        onClose={() => {
+          setLicensesOpen(false);
+        }}
+      />
     </main>
   );
 }

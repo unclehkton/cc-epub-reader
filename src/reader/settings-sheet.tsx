@@ -1,4 +1,5 @@
-import type { ConversionMode, StoredSettings } from "../domain/types";
+import type { ConversionMode, StoredSettings, UiLanguage } from "../domain/types";
+import { t } from "../ui/strings";
 
 export interface SettingsSheetProps {
   open: boolean;
@@ -6,48 +7,72 @@ export interface SettingsSheetProps {
   onChange: (next: StoredSettings) => void;
   onClose: () => void;
   conversionError?: string | null;
+  onOpenLicenses?: () => void;
 }
 
-const CONVERSION_OPTIONS: Array<{ value: ConversionMode; label: string }> = [
-  { value: "original", label: "原文" },
-  { value: "traditional", label: "一般繁體" },
-  { value: "hong-kong", label: "香港繁體" },
-  { value: "taiwan", label: "台灣繁體" },
+const CONVERSION_OPTIONS: Array<{ value: ConversionMode; labelKey: "original" | "traditional" | "hong-kong" | "taiwan" | "simplified" }> = [
+  { value: "original", labelKey: "original" },
+  { value: "traditional", labelKey: "traditional" },
+  { value: "hong-kong", labelKey: "hong-kong" },
+  { value: "taiwan", labelKey: "taiwan" },
+  { value: "simplified", labelKey: "simplified" },
 ];
+
+function conversionLabel(mode: ConversionMode, lang: UiLanguage | undefined): string {
+  const hant: Record<ConversionMode, string> = {
+    original: "原文",
+    traditional: "一般繁體",
+    "hong-kong": "香港繁體",
+    taiwan: "台灣繁體",
+    simplified: "簡體（繁→簡）",
+  };
+  const hans: Record<ConversionMode, string> = {
+    original: "原文",
+    traditional: "一般繁体",
+    "hong-kong": "香港繁体",
+    taiwan: "台湾繁体",
+    simplified: "简体（繁→简）",
+  };
+  return (lang === "zh-Hans" ? hans : hant)[mode];
+}
 
 const FONT_FAMILY_OPTIONS: Array<{
   value: StoredSettings["fontFamily"];
-  label: string;
+  hant: string;
+  hans: string;
 }> = [
-  { value: "book", label: "書本" },
-  { value: "sans", label: "無襯線" },
-  { value: "system", label: "系統" },
+  { value: "book", hant: "書本", hans: "书本" },
+  { value: "sans", hant: "無襯線", hans: "无衬线" },
+  { value: "system", hant: "系統", hans: "系统" },
 ];
 
 const BACKGROUND_OPTIONS: Array<{
   value: StoredSettings["background"];
-  label: string;
+  hant: string;
+  hans: string;
 }> = [
-  { value: "rice", label: "米色" },
-  { value: "white", label: "白色" },
-  { value: "sepia", label: "復古" },
+  { value: "rice", hant: "米色", hans: "米色" },
+  { value: "white", hant: "白色", hans: "白色" },
+  { value: "sepia", hant: "復古", hans: "复古" },
 ];
 
 const THEME_OPTIONS: Array<{
   value: StoredSettings["theme"];
-  label: string;
+  hant: string;
+  hans: string;
 }> = [
-  { value: "system", label: "跟隨系統" },
-  { value: "day", label: "日間" },
-  { value: "night", label: "夜間" },
+  { value: "system", hant: "跟隨系統", hans: "跟随系统" },
+  { value: "day", hant: "日間", hans: "日间" },
+  { value: "night", hant: "夜間", hans: "夜间" },
 ];
 
 const FLOW_OPTIONS: Array<{
   value: StoredSettings["flow"];
-  label: string;
+  hant: string;
+  hans: string;
 }> = [
-  { value: "paginated", label: "分頁" },
-  { value: "scrolled", label: "捲動" },
+  { value: "paginated", hant: "分頁", hans: "分页" },
+  { value: "scrolled", hant: "捲動", hans: "滚动" },
 ];
 
 export function SettingsSheet({
@@ -56,21 +81,28 @@ export function SettingsSheet({
   onChange,
   onClose,
   conversionError = null,
+  onOpenLicenses,
 }: SettingsSheetProps) {
   if (!open) {
     return null;
   }
 
+  const lang = settings.uiLanguage ?? "zh-Hant";
+  const label = (hant: string, hans: string) =>
+    lang === "zh-Hans" ? hans : hant;
+
   const patch = (partial: Partial<StoredSettings>) => {
     onChange({ ...settings, ...partial, key: "reader" });
   };
+
+  const margin = settings.horizontalMarginPercent ?? 4;
 
   return (
     <div class="settings-sheet-root">
       <button
         type="button"
         class="settings-backdrop"
-        aria-label="關閉設定"
+        aria-label={t(lang, "close")}
         onClick={onClose}
       />
       <div
@@ -81,27 +113,27 @@ export function SettingsSheet({
       >
         <div class="settings-sheet-header">
           <h2 id="settings-sheet-title" class="settings-sheet-title">
-            閱讀設定
+            {t(lang, "readingSettings")}
           </h2>
           <button
             type="button"
             class="settings-close touch-target"
             style={{ minWidth: "44px", minHeight: "44px" }}
-            aria-label="關閉設定"
+            aria-label={t(lang, "close")}
             onClick={onClose}
           >
-            關閉
+            {t(lang, "close")}
           </button>
         </div>
 
         <div class="settings-section">
-          <h3 class="settings-section-title">文字大小</h3>
+          <h3 class="settings-section-title">{t(lang, "fontSize")}</h3>
           <div class="settings-row">
             <button
               type="button"
               class="settings-chip touch-target"
               style={{ minWidth: "44px", minHeight: "44px" }}
-              aria-label="縮小文字"
+              aria-label={lang === "zh-Hans" ? "缩小文字" : "縮小文字"}
               onClick={() => {
                 patch({
                   fontSizePercent: Math.max(80, settings.fontSizePercent - 10),
@@ -117,7 +149,7 @@ export function SettingsSheet({
               type="button"
               class="settings-chip touch-target"
               style={{ minWidth: "44px", minHeight: "44px" }}
-              aria-label="放大文字"
+              aria-label={lang === "zh-Hans" ? "放大文字" : "放大文字"}
               onClick={() => {
                 patch({
                   fontSizePercent: Math.min(200, settings.fontSizePercent + 10),
@@ -129,9 +161,44 @@ export function SettingsSheet({
           </div>
         </div>
 
+        <div class="settings-section">
+          <h3 class="settings-section-title">{t(lang, "horizontalMargin")}</h3>
+          <div class="settings-row">
+            <button
+              type="button"
+              class="settings-chip touch-target"
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              aria-label="−"
+              onClick={() => {
+                patch({
+                  horizontalMarginPercent: Math.max(0, margin - 2),
+                });
+              }}
+            >
+              −
+            </button>
+            <span class="settings-value" aria-live="polite">
+              {margin}%
+            </span>
+            <button
+              type="button"
+              class="settings-chip touch-target"
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              aria-label="＋"
+              onClick={() => {
+                patch({
+                  horizontalMarginPercent: Math.min(20, margin + 2),
+                });
+              }}
+            >
+              ＋
+            </button>
+          </div>
+        </div>
+
         <fieldset class="settings-section">
-          <legend class="settings-section-title">字體</legend>
-          <div class="settings-options" role="radiogroup" aria-label="字體">
+          <legend class="settings-section-title">{t(lang, "fontFamily")}</legend>
+          <div class="settings-options" role="radiogroup" aria-label={t(lang, "fontFamily")}>
             {FONT_FAMILY_OPTIONS.map((option) => (
               <button
                 key={option.value}
@@ -151,15 +218,15 @@ export function SettingsSheet({
                   patch({ fontFamily: option.value });
                 }}
               >
-                {option.label}
+                {label(option.hant, option.hans)}
               </button>
             ))}
           </div>
         </fieldset>
 
         <fieldset class="settings-section">
-          <legend class="settings-section-title">背景</legend>
-          <div class="settings-options" role="radiogroup" aria-label="背景">
+          <legend class="settings-section-title">{t(lang, "background")}</legend>
+          <div class="settings-options" role="radiogroup" aria-label={t(lang, "background")}>
             {BACKGROUND_OPTIONS.map((option) => (
               <button
                 key={option.value}
@@ -179,15 +246,15 @@ export function SettingsSheet({
                   patch({ background: option.value });
                 }}
               >
-                {option.label}
+                {label(option.hant, option.hans)}
               </button>
             ))}
           </div>
         </fieldset>
 
         <fieldset class="settings-section">
-          <legend class="settings-section-title">主題</legend>
-          <div class="settings-options" role="radiogroup" aria-label="主題">
+          <legend class="settings-section-title">{t(lang, "theme")}</legend>
+          <div class="settings-options" role="radiogroup" aria-label={t(lang, "theme")}>
             {THEME_OPTIONS.map((option) => (
               <button
                 key={option.value}
@@ -207,15 +274,15 @@ export function SettingsSheet({
                   patch({ theme: option.value });
                 }}
               >
-                {option.label}
+                {label(option.hant, option.hans)}
               </button>
             ))}
           </div>
         </fieldset>
 
         <fieldset class="settings-section">
-          <legend class="settings-section-title">閱讀模式</legend>
-          <div class="settings-options" role="radiogroup" aria-label="閱讀模式">
+          <legend class="settings-section-title">{t(lang, "readingMode")}</legend>
+          <div class="settings-options" role="radiogroup" aria-label={t(lang, "readingMode")}>
             {FLOW_OPTIONS.map((option) => (
               <button
                 key={option.value}
@@ -235,18 +302,18 @@ export function SettingsSheet({
                   patch({ flow: option.value });
                 }}
               >
-                {option.label}
+                {label(option.hant, option.hans)}
               </button>
             ))}
           </div>
         </fieldset>
 
         <fieldset class="settings-section">
-          <legend class="settings-section-title">字體轉換</legend>
+          <legend class="settings-section-title">{t(lang, "conversion")}</legend>
           <div
             class="settings-options settings-options--wrap"
             role="radiogroup"
-            aria-label="字體轉換"
+            aria-label={t(lang, "conversion")}
           >
             {CONVERSION_OPTIONS.map((option) => (
               <button
@@ -267,7 +334,7 @@ export function SettingsSheet({
                   patch({ conversion: option.value });
                 }}
               >
-                {option.label}
+                {conversionLabel(option.value, lang)}
               </button>
             ))}
           </div>
@@ -277,6 +344,105 @@ export function SettingsSheet({
             </p>
           ) : null}
         </fieldset>
+
+        <fieldset class="settings-section">
+          <legend class="settings-section-title">{t(lang, "tocSide")}</legend>
+          <div class="settings-options" role="radiogroup" aria-label={t(lang, "tocSide")}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={(settings.tocSide ?? "left") === "left"}
+              class={[
+                "settings-chip touch-target",
+                (settings.tocSide ?? "left") === "left"
+                  ? "settings-chip--active"
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              onClick={() => {
+                patch({ tocSide: "left" });
+              }}
+            >
+              {t(lang, "tocLeft")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={settings.tocSide === "right"}
+              class={[
+                "settings-chip touch-target",
+                settings.tocSide === "right" ? "settings-chip--active" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              onClick={() => {
+                patch({ tocSide: "right" });
+              }}
+            >
+              {t(lang, "tocRight")}
+            </button>
+          </div>
+        </fieldset>
+
+        <fieldset class="settings-section">
+          <legend class="settings-section-title">{t(lang, "uiLanguage")}</legend>
+          <div class="settings-options" role="radiogroup" aria-label={t(lang, "uiLanguage")}>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={(settings.uiLanguage ?? "zh-Hant") === "zh-Hant"}
+              class={[
+                "settings-chip touch-target",
+                (settings.uiLanguage ?? "zh-Hant") === "zh-Hant"
+                  ? "settings-chip--active"
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              onClick={() => {
+                patch({ uiLanguage: "zh-Hant" });
+              }}
+            >
+              {t(lang, "langTraditional")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={settings.uiLanguage === "zh-Hans"}
+              class={[
+                "settings-chip touch-target",
+                settings.uiLanguage === "zh-Hans"
+                  ? "settings-chip--active"
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              onClick={() => {
+                patch({ uiLanguage: "zh-Hans" });
+              }}
+            >
+              {t(lang, "langSimplified")}
+            </button>
+          </div>
+        </fieldset>
+
+        {onOpenLicenses ? (
+          <div class="settings-section">
+            <button
+              type="button"
+              class="settings-chip touch-target settings-link-chip"
+              style={{ minWidth: "44px", minHeight: "44px" }}
+              onClick={onOpenLicenses}
+            >
+              {t(lang, "licenses")}
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

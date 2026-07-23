@@ -217,6 +217,46 @@ describe("transformChapter sanitizer", () => {
     expect(button.getAttribute("aria-label") || button.textContent?.trim()).toContain(
       "點擊顯示圖片",
     );
+    // Reserve layout so parent overlays can target unrevealed images.
+    expect(img.style.minWidth || img.getAttribute("width")).toBeTruthy();
+  });
+
+  it("associates gate failure text only with the clicked image among siblings", async () => {
+    const doc = parseHtml(`<!DOCTYPE html><html><body>
+      <div>
+        <img src="images/a.png" alt="a">
+        <img src="images/b.png" alt="b">
+      </div>
+    </body></html>`);
+
+    // Use package-relative paths so materialize is required (not pre-resolved blob).
+    const resolver: ArchiveResolver = (raw) => {
+      if (raw.startsWith("images/")) return raw;
+      return null;
+    };
+
+    const result = transformChapter(doc, resolver, {
+      materializeArchiveUrl: async (path) => {
+        if (path.includes("b.png")) return null;
+        return `blob:ok/${path}`;
+      },
+    });
+
+    const imgs = Array.from(doc.querySelectorAll("img"));
+    expect(imgs).toHaveLength(2);
+    const btnA = imgs[0]!.previousElementSibling as HTMLButtonElement;
+    const btnB = imgs[1]!.previousElementSibling as HTMLButtonElement;
+    expect(btnA.textContent).toContain("點擊顯示圖片");
+    expect(btnB.textContent).toContain("點擊顯示圖片");
+
+    btnB.click();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(btnB.textContent).toContain("圖片載入失敗");
+    expect(btnA.textContent?.trim()).toBe("點擊顯示圖片");
+
+    result.dispose();
   });
 
   it("stores srcset in data-epub-srcset and strips live srcset before activation", () => {

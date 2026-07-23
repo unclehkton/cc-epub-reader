@@ -11,11 +11,13 @@ export type OpenCCConverter = (text: string) => string;
  * - traditional → s2t  (`cn` → `t`)
  * - hong-kong   → s2hk (`cn` → `hk`)
  * - taiwan      → s2twp (`cn` → `twp`, phrase conversion)
+ * - simplified  → t2s  (`t`  → `cn`) Traditional → Simplified
  */
 export const PROFILE_OPTIONS: Record<ConvertibleMode, { from: string; to: string }> = {
   traditional: { from: "cn", to: "t" },
   "hong-kong": { from: "cn", to: "hk" },
   taiwan: { from: "cn", to: "twp" },
+  simplified: { from: "t", to: "cn" },
 };
 
 const converterCache = new Map<ConvertibleMode, OpenCCConverter>();

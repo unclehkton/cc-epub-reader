@@ -43,7 +43,23 @@ export interface LibraryBook {
   progress?: StoredProgress;
 }
 
-export type ConversionMode = "original" | "traditional" | "hong-kong" | "taiwan";
+/**
+ * Chapter text conversion profiles (OpenCC).
+ * - original: no change
+ * - traditional / hong-kong / taiwan: Simplified → Traditional
+ * - simplified: Traditional → Simplified (t2s)
+ */
+export type ConversionMode =
+  | "original"
+  | "traditional"
+  | "hong-kong"
+  | "taiwan"
+  | "simplified";
+
+/** Chrome UI language (library/reader chrome strings). */
+export type UiLanguage = "zh-Hant" | "zh-Hans";
+
+export type TocSide = "left" | "right";
 
 export interface StoredSettings {
   key: "reader";
@@ -53,4 +69,10 @@ export interface StoredSettings {
   fontFamily: "book" | "sans" | "system";
   background: "rice" | "white" | "sepia";
   theme: "system" | "day" | "night";
+  /** Horizontal page margin as percent of reader stage width (0–20). */
+  horizontalMarginPercent?: number;
+  /** TOC drawer side when overlay/side panel is shown. */
+  tocSide?: TocSide;
+  /** App chrome language. */
+  uiLanguage?: UiLanguage;
 }

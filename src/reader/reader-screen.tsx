@@ -8,6 +8,9 @@ import {
   DEFAULT_SETTINGS,
   type SettingsRepositoryLike,
 } from "../settings/settings-repository";
+import { LicenseNotice } from "../ui/license-notice";
+import { t } from "../ui/strings";
+import { convertLabels } from "./convert-labels";
 import { createProgressTracker } from "./progress-tracker";
 import {
   createReaderSession,
@@ -18,7 +21,8 @@ import {
   type ReaderSessionOptions,
 } from "./reader-session";
 import { SettingsSheet } from "./settings-sheet";
-import { TocDrawer } from "./toc-drawer";
+import { classifySwipe } from "./swipe";
+import { TocDrawer, type TocEntry } from "./toc-drawer";
 
 const SIDE_PANEL_MIN_WIDTH = 900;
 
@@ -69,15 +73,24 @@ export function ReaderScreen({
   sidePanelQuery = `(min-width: ${SIDE_PANEL_MIN_WIDTH}px)`,
 }: ReaderScreenProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLElement>(null);
   const sessionRef = useRef<ReaderSession | null>(null);
   const settingsRef = useRef<StoredSettings>({ ...DEFAULT_SETTINGS });
   const resizeRafRef = useRef<number | null>(null);
+  const touchStartRef = useRef<{
+    x: number;
+    y: number;
+    time: number;
+  } | null>(null);
+  /** Suppress host click (chrome toggle) after a swipe page turn. */
+  const suppressClickRef = useRef(false);
 
   const [settings, setSettings] = useState<StoredSettings>({
     ...DEFAULT_SETTINGS,
   });
   const [summary, setSummary] = useState<BookSummary | null>(null);
+  const [tocEntries, setTocEntries] = useState<TocEntry[]>([]);
   const [location, setLocation] = useState<ReaderLocation | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -85,6 +98,7 @@ export function ReaderScreen({
   const [chromeVisible, setChromeVisible] = useState(true);
   const [tocOpen, setTocOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [licensesOpen, setLicensesOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [sidePanel, setSidePanel] = useState(false);
@@ -97,6 +111,10 @@ export function ReaderScreen({
       }),
     [book.id, repository],
   );
+
+  const uiLang = settings.uiLanguage ?? "zh-Hant";
+  const tocSide = settings.tocSide ?? "left";
+  const marginPercent = settings.horizontalMarginPercent ?? 4;
 
   // Keep refs in sync for event handlers that close over stale state.
   useEffect(() => {
@@ -153,6 +171,37 @@ export function ReaderScreen({
     };
   }, []);
 
+  // Convert TOC labels when conversion mode or summary changes.
+  useEffect(() => {
+    let cancelled = false;
+    const source = summary?.toc ?? [];
+    if (source.length === 0) {
+      setTocEntries([]);
+      return;
+    }
+    const mode = settings.conversion;
+    if (mode === "original") {
+      setTocEntries(source.map((e) => ({ label: e.label, href: e.href })));
+      return;
+    }
+    void (async () => {
+      const labels = await convertLabels(
+        source.map((e) => e.label),
+        mode,
+      );
+      if (cancelled) return;
+      setTocEntries(
+        source.map((entry, i) => ({
+          href: entry.href,
+          label: labels[i] ?? entry.label,
+        })),
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [summary, settings.conversion]);
+
   // Open session once the host element mounts.
   useEffect(() => {
     const host = hostRef.current;
@@ -185,6 +234,7 @@ export function ReaderScreen({
           fontFamily: loadedSettings.fontFamily,
           background: loadedSettings.background,
           theme: loadedSettings.theme,
+          horizontalMarginPercent: loadedSettings.horizontalMarginPercent ?? 4,
         },
         persistence: "durable",
       });
@@ -202,7 +252,12 @@ export function ReaderScreen({
             setErrorMessage(null);
           }
         } else if (event.type === "conversion-error") {
-          setConversionError(event.message || "字體轉換失敗，已還原原文。");
+          setConversionError(
+            event.message ||
+              (settingsRef.current.uiLanguage === "zh-Hans"
+                ? "字体转换失败，已还原原文。"
+                : "字體轉換失敗，已還原原文。"),
+          );
         }
       });
 
@@ -221,7 +276,9 @@ export function ReaderScreen({
         const message =
           error instanceof Error && error.message
             ? error.message
-            : "無法開啟此書。";
+            : settingsRef.current.uiLanguage === "zh-Hans"
+              ? "无法开启此书。"
+              : "無法開啟此書。";
         setStatus("error");
         setErrorMessage(message);
       }
@@ -272,11 +329,12 @@ export function ReaderScreen({
     const root = document.documentElement;
     root.dataset.readerTheme = resolved;
     root.dataset.readerBg = settings.background;
+    root.lang = settings.uiLanguage === "zh-Hans" ? "zh-Hans" : "zh-Hant";
     return () => {
       delete root.dataset.readerTheme;
       delete root.dataset.readerBg;
     };
-  }, [settings.theme, settings.background]);
+  }, [settings.theme, settings.background, settings.uiLanguage]);
 
   const persistSettings = useCallback(
     async (next: StoredSettings) => {
@@ -304,6 +362,7 @@ export function ReaderScreen({
         fontFamily: next.fontFamily,
         background: next.background,
         theme: next.theme,
+        horizontalMarginPercent: next.horizontalMarginPercent ?? 4,
       });
 
       if (next.flow !== prev.flow) {
@@ -327,26 +386,97 @@ export function ReaderScreen({
   );
 
   const goPrevious = useCallback(() => {
-    void sessionRef.current?.goPrevious();
+    void sessionRef.current?.goPrevious().catch(() => {
+      // Session already emits status; consume rejection.
+    });
   }, []);
 
   const goNext = useCallback(() => {
-    void sessionRef.current?.goNext();
+    void sessionRef.current?.goNext().catch(() => {
+      // Session already emits status; consume rejection.
+    });
   }, []);
 
-  const handleTocSelect = useCallback((href: string) => {
-    void sessionRef.current?.display(href);
-    if (!sidePanel) {
-      setTocOpen(false);
-    }
-  }, [sidePanel]);
+  const handleTocSelect = useCallback(
+    (href: string) => {
+      void sessionRef.current?.display(href).catch(() => {
+        // status event
+      });
+      if (!sidePanel) {
+        setTocOpen(false);
+      }
+    },
+    [sidePanel],
+  );
 
   const toggleChrome = useCallback(() => {
-    if (settingsOpen || (tocOpen && !sidePanel)) {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (settingsOpen || licensesOpen || (tocOpen && !sidePanel)) {
       return;
     }
     setChromeVisible((v) => !v);
-  }, [settingsOpen, tocOpen, sidePanel]);
+  }, [settingsOpen, licensesOpen, tocOpen, sidePanel]);
+
+  // Swipe left/right for page turns (mobile).
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) {
+        touchStartRef.current = null;
+        return;
+      }
+      const touch = event.touches[0]!;
+      touchStartRef.current = {
+        x: touch.clientX,
+        y: touch.clientY,
+        time: Date.now(),
+      };
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      const start = touchStartRef.current;
+      touchStartRef.current = null;
+      if (!start || event.changedTouches.length === 0) return;
+      // Paginated mode only — scrolled mode needs vertical free scroll.
+      if (settingsRef.current.flow !== "paginated") return;
+      if (settingsOpen || licensesOpen || (tocOpen && !sidePanel)) return;
+
+      const touch = event.changedTouches[0]!;
+      const direction = classifySwipe({
+        startX: start.x,
+        startY: start.y,
+        endX: touch.clientX,
+        endY: touch.clientY,
+        durationMs: Date.now() - start.time,
+      });
+      if (!direction) return;
+
+      suppressClickRef.current = true;
+      if (direction === "left") {
+        goNext();
+      } else {
+        goPrevious();
+      }
+    };
+
+    const onTouchCancel = () => {
+      touchStartRef.current = null;
+    };
+
+    stage.addEventListener("touchstart", onTouchStart, { passive: true });
+    stage.addEventListener("touchend", onTouchEnd, { passive: true });
+    stage.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    return () => {
+      stage.removeEventListener("touchstart", onTouchStart);
+      stage.removeEventListener("touchend", onTouchEnd);
+      stage.removeEventListener("touchcancel", onTouchCancel);
+    };
+  }, [goNext, goPrevious, settingsOpen, licensesOpen, tocOpen, sidePanel]);
 
   const handleFullscreen = useCallback(async () => {
     const shell = shellRef.current;
@@ -399,9 +529,11 @@ export function ReaderScreen({
       }
     }
     void (async () => {
-      await tracker.flush();
-      // Drain again if a write error restored pending mid-flush.
-      await tracker.flush();
+      try {
+        await tracker.flush();
+      } catch {
+        // Progress may stay pending for a later lifecycle retry; never block close.
+      }
       onClose();
     })();
   }, [onClose, tracker, location]);
@@ -415,13 +547,21 @@ export function ReaderScreen({
 
   const title = summary?.title ?? book.title;
   const chapterLabel =
+    tocEntries.find(
+      (entry) =>
+        location?.spineHref &&
+        (entry.href === location.spineHref ||
+          location.spineHref.endsWith(entry.href) ||
+          entry.href.endsWith(location.spineHref)),
+    )?.label ??
     summary?.toc.find(
       (entry) =>
         location?.spineHref &&
         (entry.href === location.spineHref ||
           location.spineHref.endsWith(entry.href) ||
           entry.href.endsWith(location.spineHref)),
-    )?.label ?? title;
+    )?.label ??
+    title;
 
   const chromeHidden = focusMode || !chromeVisible;
   const showToc = sidePanel || tocOpen;
@@ -436,12 +576,18 @@ export function ReaderScreen({
         `reader-screen--${resolvedTheme}`,
         `reader-screen--bg-${settings.background}`,
         sidePanel ? "reader-screen--side-toc" : "",
+        tocSide === "right" ? "reader-screen--toc-right" : "",
         chromeHidden ? "reader-screen--chrome-hidden" : "",
         focusMode ? "reader-screen--focus" : "",
       ]
         .filter(Boolean)
         .join(" ")}
-      aria-label={`閱讀：${title}`}
+      style={{
+        "--reader-h-margin": `${marginPercent}%`,
+      }}
+      aria-label={
+        uiLang === "zh-Hans" ? `阅读：${title}` : `閱讀：${title}`
+      }
       data-spine-href={location?.spineHref ?? ""}
       data-cfi={location?.cfi ?? ""}
       data-progress-percent={
@@ -467,14 +613,14 @@ export function ReaderScreen({
           type="button"
           class="reader-icon-btn touch-target"
           style={{ minWidth: "44px", minHeight: "44px" }}
-          aria-label="目錄"
+          aria-label={t(uiLang, "toc")}
           aria-expanded={showToc}
           onClick={() => {
             if (sidePanel) return;
             setTocOpen((open) => !open);
           }}
         >
-          目錄
+          {t(uiLang, "toc")}
         </button>
         <div class="reader-title-block">
           <h1 class="reader-book-title">{title}</h1>
@@ -484,71 +630,86 @@ export function ReaderScreen({
           type="button"
           class="reader-icon-btn touch-target"
           style={{ minWidth: "44px", minHeight: "44px" }}
-          aria-label="閱讀設定"
+          aria-label={t(uiLang, "readingSettings")}
           aria-expanded={settingsOpen}
           onClick={() => {
             setSettingsOpen(true);
           }}
         >
-          設定
+          {t(uiLang, "settings")}
         </button>
         <button
           type="button"
           class="reader-icon-btn touch-target"
           style={{ minWidth: "44px", minHeight: "44px" }}
           aria-label={
-            isFullscreen || focusMode ? "結束全螢幕" : "全螢幕"
+            isFullscreen || focusMode
+              ? t(uiLang, "exitFullscreen")
+              : t(uiLang, "fullscreen")
           }
           onClick={() => {
             void handleFullscreen();
           }}
         >
-          {isFullscreen || focusMode ? "結束" : "全螢幕"}
+          {isFullscreen || focusMode
+            ? uiLang === "zh-Hans"
+              ? "结束"
+              : "結束"
+            : t(uiLang, "fullscreen")}
         </button>
         <button
           type="button"
           class="reader-icon-btn touch-target"
           style={{ minWidth: "44px", minHeight: "44px" }}
-          aria-label="返回書庫"
+          aria-label={t(uiLang, "backToLibrary")}
           onClick={handleClose}
         >
-          關閉
+          {t(uiLang, "close")}
         </button>
       </header>
 
-      <div class="reader-body">
+      <div
+        class={[
+          "reader-body",
+          tocSide === "right" ? "reader-body--toc-right" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <TocDrawer
           open={showToc}
-          entries={summary?.toc ?? []}
+          entries={tocEntries}
           activeHref={location?.spineHref}
           sidePanel={sidePanel}
+          side={tocSide}
+          uiLanguage={uiLang}
           onSelect={handleTocSelect}
           onClose={() => {
             setTocOpen(false);
           }}
         />
 
-        <div class="reader-stage">
+        <div class="reader-stage" ref={stageRef}>
           {/* Edge hit targets remain available when chrome is hidden. */}
           <button
             type="button"
             class="reader-edge reader-edge--prev touch-target"
             style={{ minWidth: "44px", minHeight: "44px" }}
-            aria-label="上一頁"
+            aria-label={t(uiLang, "prevPage")}
             onClick={goPrevious}
           />
           <div
             class="reader-host"
             ref={hostRef}
             role="document"
-            aria-label="正文"
+            aria-label={uiLang === "zh-Hans" ? "正文" : "正文"}
             onClick={toggleChrome}
           />
           <button
             type="button"
             class="reader-edge reader-edge--next touch-target"
             style={{ minWidth: "44px", minHeight: "44px" }}
-            aria-label="下一頁"
+            aria-label={t(uiLang, "nextPage")}
             onClick={goNext}
           />
         </div>
@@ -566,10 +727,10 @@ export function ReaderScreen({
           type="button"
           class="reader-nav-btn touch-target"
           style={{ minWidth: "44px", minHeight: "44px" }}
-          aria-label="上一頁"
+          aria-label={t(uiLang, "prevPage")}
           onClick={goPrevious}
         >
-          上一頁
+          {t(uiLang, "prevPage")}
         </button>
         <p class="reader-progress" aria-live="polite">
           {percentLabel}
@@ -578,10 +739,10 @@ export function ReaderScreen({
           type="button"
           class="reader-nav-btn touch-target"
           style={{ minWidth: "44px", minHeight: "44px" }}
-          aria-label="下一頁"
+          aria-label={t(uiLang, "nextPage")}
           onClick={goNext}
         >
-          下一頁
+          {t(uiLang, "nextPage")}
         </button>
       </footer>
 
@@ -599,7 +760,7 @@ export function ReaderScreen({
 
       {status === "loading" ? (
         <p class="reader-loading" aria-live="polite">
-          載入中…
+          {t(uiLang, "loading")}
         </p>
       ) : null}
 
@@ -612,6 +773,18 @@ export function ReaderScreen({
         }}
         onClose={() => {
           setSettingsOpen(false);
+        }}
+        onOpenLicenses={() => {
+          setSettingsOpen(false);
+          setLicensesOpen(true);
+        }}
+      />
+
+      <LicenseNotice
+        open={licensesOpen}
+        uiLanguage={uiLang}
+        onClose={() => {
+          setLicensesOpen(false);
         }}
       />
     </section>

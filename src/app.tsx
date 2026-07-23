@@ -602,6 +602,7 @@ export function App() {
           repository={repository}
           sessionOnly={sessionOnly}
           sessionOnlyMessage={sessionOnlyMessage}
+          settingsRepository={settingsRepository}
           onOpenBook={(next) => {
             void handleOpenBook(next);
           }}

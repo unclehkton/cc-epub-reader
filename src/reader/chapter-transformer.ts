@@ -555,6 +555,15 @@ function gateImages(
       continue;
     }
 
+    // Ensure unrevealed images still occupy space so parent gates can target them.
+    if (!img.getAttribute("width") && !img.style.width) {
+      img.style.minWidth = "48px";
+    }
+    if (!img.getAttribute("height") && !img.style.height) {
+      img.style.minHeight = "48px";
+    }
+    img.style.display = img.style.display || "inline-block";
+
     installImageGate(doc, img, disposers, isDisposed, materialize);
   }
 }
@@ -794,22 +803,16 @@ function revalidateStoredSrcset(stored: string): string | null {
 }
 
 function findAssociatedGateButton(img: Element): HTMLButtonElement | null {
-  const parent = img.parentElement;
-  if (!parent) return null;
-  const buttons = parent.querySelectorAll("button");
-  for (const button of Array.from(buttons)) {
-    if (button.textContent?.includes(GATE_LABEL) || button.getAttribute("aria-label") === GATE_LABEL
-      || button.textContent?.includes("圖片載入失敗")) {
-      // Prefer a sibling immediately before the image.
-      if (button.nextElementSibling === img || parent.contains(img)) {
-        return button as HTMLButtonElement;
-      }
-    }
-  }
-  // Fallback: previous element sibling.
+  // Exact association only — never `parent.contains(img)` (always true).
   const prev = img.previousElementSibling;
   if (prev && prev.tagName.toLowerCase() === "button") {
-    return prev as HTMLButtonElement;
+    const label = prev.getAttribute("aria-label") || prev.textContent || "";
+    if (
+      label.includes(GATE_LABEL) ||
+      label.includes("圖片載入失敗")
+    ) {
+      return prev as HTMLButtonElement;
+    }
   }
   return null;
 }

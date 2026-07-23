@@ -283,7 +283,7 @@ describe("ReaderScreen", () => {
     expect(sessions[0]!.flowCalls).toHaveLength(0);
   });
 
-  it("exposes the four conversion labels and applies conversion mode", async () => {
+  it("exposes conversion labels including simplified and applies conversion mode", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     renderReader();
 
@@ -295,6 +295,7 @@ describe("ReaderScreen", () => {
     expect(screen.getByRole("radio", { name: "一般繁體" })).toBeTruthy();
     expect(screen.getByRole("radio", { name: "香港繁體" })).toBeTruthy();
     expect(screen.getByRole("radio", { name: "台灣繁體" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "簡體（繁→簡）" })).toBeTruthy();
 
     await user.click(screen.getByRole("radio", { name: "香港繁體" }));
     await waitFor(() => {

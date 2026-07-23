@@ -13,6 +13,9 @@ export const DEFAULT_SETTINGS: StoredSettings = {
   fontFamily: "book",
   background: "rice",
   theme: "system",
+  horizontalMarginPercent: 4,
+  tocSide: "left",
+  uiLanguage: "zh-Hant",
 };
 
 const SETTINGS_KEY = "reader" as const;
@@ -23,6 +26,15 @@ const CONVERSIONS = new Set<ConversionMode>([
   "traditional",
   "hong-kong",
   "taiwan",
+  "simplified",
+]);
+const TOC_SIDES = new Set<NonNullable<StoredSettings["tocSide"]>>([
+  "left",
+  "right",
+]);
+const UI_LANGS = new Set<NonNullable<StoredSettings["uiLanguage"]>>([
+  "zh-Hant",
+  "zh-Hans",
 ]);
 const FONT_FAMILIES = new Set<StoredSettings["fontFamily"]>([
   "book",
@@ -77,6 +89,24 @@ export function parseStoredSettings(value: unknown): StoredSettings {
     fontSizePercent = Math.max(80, Math.min(200, Math.round(record.fontSizePercent)));
   }
 
+  let horizontalMarginPercent = DEFAULT_SETTINGS.horizontalMarginPercent ?? 4;
+  if (isFiniteNumber(record.horizontalMarginPercent)) {
+    horizontalMarginPercent = Math.max(
+      0,
+      Math.min(20, Math.round(record.horizontalMarginPercent)),
+    );
+  }
+  const tocSide =
+    typeof record.tocSide === "string" &&
+    TOC_SIDES.has(record.tocSide as NonNullable<StoredSettings["tocSide"]>)
+      ? (record.tocSide as NonNullable<StoredSettings["tocSide"]>)
+      : DEFAULT_SETTINGS.tocSide;
+  const uiLanguage =
+    typeof record.uiLanguage === "string" &&
+    UI_LANGS.has(record.uiLanguage as NonNullable<StoredSettings["uiLanguage"]>)
+      ? (record.uiLanguage as NonNullable<StoredSettings["uiLanguage"]>)
+      : DEFAULT_SETTINGS.uiLanguage;
+
   return {
     key: SETTINGS_KEY,
     flow,
@@ -85,6 +115,9 @@ export function parseStoredSettings(value: unknown): StoredSettings {
     fontFamily,
     background,
     theme,
+    horizontalMarginPercent,
+    tocSide,
+    uiLanguage,
   };
 }
 

@@ -113,21 +113,26 @@ class ProgressTrackerImpl implements ProgressTracker {
       if (this.destroyed) return;
     }
 
-    // Loop so a pending value that arrives during save is not dropped.
+    // Drain newer snapshots written during an in-flight save, but never spin
+    // forever when saveFn keeps rejecting (would block reader close).
     while (!this.destroyed && this.pending) {
       const snapshot = this.pending;
       this.pending = null;
-      this.flushPromise = this.saveFn(snapshot)
-        .catch(() => {
-          // Best-effort persistence; restore pending so a later flush can retry.
-          if (!this.destroyed && !this.pending) {
-            this.pending = snapshot;
-          }
-        })
-        .finally(() => {
+      try {
+        this.flushPromise = this.saveFn(snapshot).finally(() => {
           this.flushPromise = null;
         });
-      await this.flushPromise;
+        await this.flushPromise;
+      } catch (error) {
+        // Restore for a later lifecycle/pagehide retry, then exit this flush.
+        if (!this.destroyed && !this.pending) {
+          this.pending = snapshot;
+        }
+        throw error instanceof Error
+          ? error
+          : new Error("Failed to save reading progress");
+      }
+      // If save succeeded and nothing newer arrived, loop ends.
     }
   }
 

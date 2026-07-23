@@ -51,6 +51,26 @@ describe("ProgressTracker", () => {
     vi.restoreAllMocks();
   });
 
+  it("flush settles when saveFn always rejects instead of looping forever", async () => {
+    const save = vi.fn(async () => {
+      throw new Error("QuotaExceededError");
+    });
+    const tracker = createProgressTracker({
+      bookId: "book-1",
+      save,
+    });
+    tracker.onRelocated(location({ cfi: "cfi-1", approximatePercent: 20 }));
+
+    // Must resolve/reject, not hang.
+    await expect(tracker.flush()).rejects.toThrow(/QuotaExceededError|儲存|failed/i);
+    // At most a small number of attempts (not infinite).
+    expect(save.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(save.mock.calls.length).toBeLessThanOrEqual(3);
+    // Pending retained for a later lifecycle retry.
+    expect(tracker.getPending()?.cfi).toBe("cfi-1");
+    tracker.destroy();
+  });
+
   it("drains pending progress written during an in-flight save", async () => {
     const saves: string[] = [];
     let releaseFirst!: () => void;
