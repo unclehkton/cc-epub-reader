@@ -31,6 +31,7 @@ export type { ArchiveResolver };
 /** Optional on-demand blob materializer for package-relative data-epub-src values. */
 export type MaterializeArchiveUrl = (
   packagePath: string,
+  options?: { maxBytes?: number; timeoutMs?: number },
 ) => Promise<string | null>;
 
 export interface ChapterTransformResult {
@@ -534,17 +535,27 @@ function stripRemoteStylesheets(
   }
 }
 
+/** Cumulative wall-clock budget for all stylesheet attempts on one chapter. */
+export const CSS_INJECT_TOTAL_TIMEOUT_MS = 6_000;
+/** Per-stylesheet materialize timeout (shared budget still applies). */
+export const CSS_INJECT_PER_SHEET_TIMEOUT_MS = 1_500;
+
 /**
  * Materialize package stylesheets marked with data-epub-css and inject as
  * sanitized <style> into the live chapter document.
  *
- * Attempted-link budget is applied up front (`slice(0, MAX)`): missing or
- * slow stylesheets still consume a slot so a hostile package cannot queue
- * unbounded materialize/fetch timeouts past the cap.
+ * Attempted-link budget is applied up front (`slice(0, MAX)`). Each candidate
+ * is size-capped at materialize (256 KiB) before keep; CSS blob is revoked
+ * after text is read. Aggregate + cumulative timeout fail closed.
  */
 export async function injectPackageStylesheets(
   doc: Document,
   materialize: MaterializeArchiveUrl,
+  options?: {
+    isStale?: () => boolean;
+    /** Optional revoke for temporary CSS blobs after text extraction. */
+    revokeUrl?: (url: string) => void;
+  },
 ): Promise<void> {
   const allLinks = Array.from(
     doc.querySelectorAll('link[data-epub-css], link[rel~="stylesheet"]'),
@@ -556,8 +567,15 @@ export async function injectPackageStylesheets(
   }
 
   let aggregate = 0;
+  const deadline = Date.now() + CSS_INJECT_TOTAL_TIMEOUT_MS;
+  const isStale = options?.isStale ?? (() => false);
+  const revokeUrl = options?.revokeUrl;
 
   for (const link of links) {
+    if (isStale() || Date.now() > deadline) {
+      link.remove();
+      continue;
+    }
     const path =
       link.getAttribute("data-epub-css") ||
       link.getAttribute("href") ||
@@ -566,11 +584,23 @@ export async function injectPackageStylesheets(
       link.remove();
       continue;
     }
+    // Materialize with CSS size ceiling — drop before returning a huge blob.
     let url: string | null = null;
     try {
-      url = await materialize(path);
+      url = await materialize(path, {
+        maxBytes: MAX_SINGLE_CSS_BYTES,
+        timeoutMs: Math.max(
+          200,
+          Math.min(CSS_INJECT_PER_SHEET_TIMEOUT_MS, deadline - Date.now()),
+        ),
+      });
     } catch {
       url = null;
+    }
+    if (isStale()) {
+      if (url?.startsWith("blob:") && revokeUrl) revokeUrl(url);
+      link.remove();
+      continue;
     }
     if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
       link.remove();
@@ -579,10 +609,20 @@ export async function injectPackageStylesheets(
     let text = "";
     try {
       const res = await fetch(url);
+      // Bound text read via blob size already checked; still clamp length.
       text = await res.text();
     } catch {
+      if (url.startsWith("blob:") && revokeUrl) revokeUrl(url);
       link.remove();
       continue;
+    }
+    // Temporary CSS blob no longer needed once text is in memory.
+    if (url.startsWith("blob:") && revokeUrl) {
+      try {
+        revokeUrl(url);
+      } catch {
+        // ignore
+      }
     }
     if (text.length > MAX_SINGLE_CSS_BYTES) {
       link.remove();
@@ -590,6 +630,10 @@ export async function injectPackageStylesheets(
     }
     aggregate += text.length;
     if (aggregate > MAX_AGGREGATE_CSS_BYTES) {
+      link.remove();
+      continue;
+    }
+    if (isStale()) {
       link.remove();
       continue;
     }

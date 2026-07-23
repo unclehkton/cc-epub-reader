@@ -14,7 +14,7 @@ import {
 } from "./library/library-screen";
 import { isImportError } from "./library/import-errors";
 import { openDatabaseWithTimeout } from "./library/idb";
-import { validateEpub } from "./library/epub-validator";
+import { validateEpubBytes } from "./library/epub-validator";
 import {
   assessImport,
   collectBrowserImportSignals,
@@ -523,18 +523,18 @@ export function App() {
           return;
         }
 
-        // Re-apply platform assessment on measured blob size (not metadata alone).
-        // SW only has a conservative fallback and must not be the sole policy gate.
-        const measuredSize =
-          typeof entry.epub?.size === "number" && entry.epub.size > 0
-            ? entry.epub.size
-            : entry.byteLength;
-        if (
-          typeof entry.epub?.size === "number" &&
-          entry.epub.size > 0 &&
-          entry.byteLength > 0 &&
-          entry.epub.size !== entry.byteLength
-        ) {
+        // Prefer staged ArrayBuffer — never Blob.arrayBuffer() again on promote.
+        const stagedBytes = entry.epubBytes;
+        if (!stagedBytes || !(stagedBytes instanceof ArrayBuffer)) {
+          await deleteShareInboxEntry(shareId);
+          if (!cancelled) {
+            setShareError("分享的 EPUB 資料不完整，請改用「匯入 EPUB」。");
+            clearShareImportQuery();
+          }
+          return;
+        }
+        const measuredSize = stagedBytes.byteLength;
+        if (entry.byteLength > 0 && entry.byteLength !== measuredSize) {
           await deleteShareInboxEntry(shareId);
           if (!cancelled) {
             setShareError("分享的 EPUB 資料不一致，請改用「匯入 EPUB」。");
@@ -557,7 +557,6 @@ export function App() {
           return;
         }
         if (assessment.decision === "warn") {
-          // Mirror picker: require explicit confirm before large-file validate.
           const ok =
             typeof window !== "undefined" &&
             window.confirm(
@@ -573,9 +572,13 @@ export function App() {
           }
         }
 
-        const validated = await validateEpub(entry.epub, entry.fileName, {
-          maxBytes: assessment.blockingThresholdBytes,
-        });
+        // Validate the staged buffer in place (no second full-file read).
+        const validated = await validateEpubBytes(
+          stagedBytes,
+          entry.fileName,
+          "application/epub+zip",
+          { maxBytes: assessment.blockingThresholdBytes },
+        );
         // Resilient promote: durable first, session-only on quota.
         await repository.promoteShare(shareId, validated, {
           deleteShare: deleteShareInboxEntry,

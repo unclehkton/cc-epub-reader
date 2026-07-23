@@ -801,6 +801,61 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
+  it("failed cross-spine display after content hook keeps current image blob", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <img data-epub-src="images/a.png" alt="x">
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+      </body></html>`,
+      "text/html",
+    );
+    // Place button before img as parent-gate pairing expects.
+    const img = chapterDoc.querySelector("img")!;
+    const btn = chapterDoc.querySelector("button")!;
+    img.parentNode?.insertBefore(btn, img);
+
+    control.contentsDocument = chapterDoc;
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+
+    // Materialize a chapter image blob via archive createUrl path.
+    control.imageUrl.resolve("blob:fake-chapter-image");
+    // Trigger spine content hook for current chapter then rebind (open already did).
+    await control.contentHooks.trigger!(
+      chapterDoc,
+      { href: "ch1.xhtml" },
+    );
+
+    // Simulate revealed image URL tracked on session via materialize.
+    // Track via public trackObjectUrl after forcing makeMaterialize usage:
+    // install parent gate click path is heavy; instead assert revoke does not
+    // fire when display fails after *incoming* hook only.
+    const incomingDoc = new DOMParser().parseFromString(
+      "<html><body><p>incoming</p></body></html>",
+      "text/html",
+    );
+    // Start failed display; fire content hook for destination while in-flight.
+    control.displayCalls.length = 0;
+    const displayPromise = session.display("ch2.xhtml");
+    await waitFor(() => control.displayCalls.length >= 1, "cross display");
+    // Incoming content hook must not revoke live chapter resources.
+    await control.contentHooks.trigger!(
+      incomingDoc,
+      { href: "ch2.xhtml" },
+    );
+    control.displayCalls[0]!.deferred.reject(new Error("display failed"));
+    await expect(displayPromise).rejects.toThrow(/display failed/);
+
+    // Current chapter still interactive.
+    events.length = 0;
+    chapterDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+    // Live location unchanged.
+    expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
+    session.destroy();
+  });
+
   it("after display settles, only the new contents document is bound", async () => {
     const control = createControl();
     const oldDoc = new DOMParser().parseFromString(

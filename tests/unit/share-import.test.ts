@@ -165,9 +165,9 @@ describe("handleShareTarget", () => {
     fetchSpy.mockRestore();
   });
 
-  it("blocks share-target at 50 MiB policy (not only the 100 MiB envelope)", async () => {
+  it("blocks share-target at 50 MiB before staging (no full-file materialize)", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    // iPhone picker blocks at 50 MiB — share path must match (G9 / 0723-005).
+    // Oversized payloads must be rejected before arrayBuffer write to IDB.
     const overPolicy = await handleShareTarget(
       multipartRequest(
         makeEpubFile("iphone-mid.epub", {
@@ -213,6 +213,9 @@ describe("handleShareTarget", () => {
     const staged = await getShareInboxEntry(id!);
     expect(staged?.fileName).toBe("from-share.epub");
     expect(staged?.byteLength).toBe(file.size);
+    // Staged payload is ArrayBuffer identity for single-read validate.
+    expect(staged?.epubBytes).toBeInstanceOf(ArrayBuffer);
+    expect(staged?.epubBytes?.byteLength).toBe(file.size);
     expect(staged?.epub).toBeInstanceOf(Blob);
 
     fetchSpy.mockRestore();

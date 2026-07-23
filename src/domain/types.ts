@@ -31,7 +31,13 @@ export interface ShareInboxEntry {
   id: string;
   fileName: string;
   byteLength: number;
-  epub: Blob;
+  /**
+   * Preferred durable payload from IndexedDB (single ArrayBuffer identity).
+   * Share promote should validate this without Blob.arrayBuffer().
+   */
+  epubBytes?: ArrayBuffer;
+  /** Blob wrapper when needed; prefer epubBytes for large files. */
+  epub?: Blob;
   receivedAt: number;
 }
 

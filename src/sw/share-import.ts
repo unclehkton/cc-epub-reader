@@ -169,12 +169,9 @@ export async function expireShareInbox(
   }
 }
 
-function epubFieldToBlob(value: unknown): Blob | undefined {
-  if (typeof Blob !== "undefined" && value instanceof Blob) {
-    return value;
-  }
+function epubFieldToBytes(value: unknown): ArrayBuffer | undefined {
   if (value instanceof ArrayBuffer) {
-    return new Blob([value], { type: "application/epub+zip" });
+    return value;
   }
   if (ArrayBuffer.isView(value)) {
     const view = value as ArrayBufferView;
@@ -182,14 +179,21 @@ function epubFieldToBlob(value: unknown): Blob | undefined {
     new Uint8Array(copy).set(
       new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
     );
-    return new Blob([copy], { type: "application/epub+zip" });
+    return copy;
   }
   return undefined;
 }
 
 export async function stageShareInbox(entry: ShareInboxEntry): Promise<void> {
   // WebKit cannot structured-clone Blob/File into IndexedDB; store ArrayBuffer.
-  const epubBytes = await entry.epub.arrayBuffer();
+  // Prefer pre-read epubBytes (one OS read in handleShareTarget).
+  let epubBytes = entry.epubBytes;
+  if (!epubBytes && entry.epub) {
+    epubBytes = await entry.epub.arrayBuffer();
+  }
+  if (!epubBytes) {
+    throw new Error("Share inbox entry missing EPUB bytes");
+  }
   const persisted = {
     id: entry.id,
     fileName: entry.fileName,
@@ -221,21 +225,24 @@ export async function getShareInboxEntry(
       return undefined;
     }
     const record = value as Record<string, unknown>;
-    const epub = epubFieldToBlob(record.epub);
+    const epubBytes = epubFieldToBytes(record.epub);
     if (
       typeof record.id !== "string" ||
       typeof record.fileName !== "string" ||
       typeof record.byteLength !== "number" ||
       typeof record.receivedAt !== "number" ||
-      !epub
+      !epubBytes
     ) {
       return undefined;
     }
+    // Return ArrayBuffer identity for single-read validate; Blob only as
+    // optional convenience (lazy wrapper — do not arrayBuffer it again).
     return {
       id: record.id,
       fileName: record.fileName,
       byteLength: record.byteLength,
-      epub,
+      epubBytes,
+      epub: new Blob([epubBytes], { type: "application/epub+zip" }),
       receivedAt: record.receivedAt,
     };
   } finally {
@@ -309,7 +316,7 @@ export async function handleShareTarget(request: Request): Promise<Response> {
     return localErrorResponse(415, "只接受 EPUB 檔案。");
   }
 
-  // Platform-safe block (50 MiB) + absolute envelope (100 MiB).
+  // Platform-safe block (50 MiB) + absolute envelope (100 MiB) BEFORE any full read.
   if (
     file.size >= SHARE_TARGET_BLOCK_BYTES ||
     file.size > MAX_SHARE_EPUB_BYTES
@@ -324,14 +331,25 @@ export async function handleShareTarget(request: Request): Promise<Response> {
     // Staging can still proceed if cleanup fails.
   }
 
+  // Single complete read of the OS payload; stage the same ArrayBuffer.
+  let epubBytes: ArrayBuffer;
+  try {
+    epubBytes = await file.arrayBuffer();
+  } catch {
+    return localErrorResponse(400, "無法讀取分享內容。");
+  }
+  if (epubBytes.byteLength !== file.size) {
+    return localErrorResponse(400, "分享內容大小不一致。");
+  }
+
   const id = createId();
   const fileName =
     (file.name && file.name.trim()) || "shared.epub";
   const entry: ShareInboxEntry = {
     id,
     fileName,
-    byteLength: file.size,
-    epub: file,
+    byteLength: epubBytes.byteLength,
+    epubBytes,
     receivedAt: Date.now(),
   };
 

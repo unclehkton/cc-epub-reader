@@ -403,13 +403,23 @@ export function disposeMaterializedUrl(
  * abandoned on timeout and dispose any late-resolving blob so it is not leaked.
  * Size checks are fail-closed: any failure to verify size rejects the URL.
  */
+export interface MaterializeArchiveOptions {
+  /** Reject blob larger than this (bytes). Defaults to MAX_ENTRY_UNCOMPRESSED_BYTES. */
+  maxBytes?: number;
+  /** Optional createUrl timeout override (ms). */
+  timeoutMs?: number;
+}
+
 export async function materializeArchiveUrl(
   book: AdaptedBook,
   packagePath: string,
   ownedObjectUrls?: Set<string>,
+  options?: MaterializeArchiveOptions,
 ): Promise<string | null> {
   const path = packagePath.trim();
   if (!path) return null;
+  const maxBytes = options?.maxBytes ?? MAX_ENTRY_UNCOMPRESSED_BYTES;
+  const timeoutMs = options?.timeoutMs ?? MATERIALIZE_TIMEOUT_MS;
   if (path.startsWith("blob:") || path.startsWith("data:")) {
     return path;
   }
@@ -478,7 +488,7 @@ export async function materializeArchiveUrl(
         timer = setTimeout(() => {
           abandoned = true;
           resolve({ kind: "timeout" });
-        }, MATERIALIZE_TIMEOUT_MS);
+        }, timeoutMs);
         void tracked.then((url) => {
           if (abandoned) return;
           if (timer !== undefined) clearTimeout(timer);
@@ -510,7 +520,9 @@ export async function materializeArchiveUrl(
         try {
           const response = await fetch(out);
           const blob = await response.blob();
-          if (blob.size <= 0 || blob.size > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+          // Size check BEFORE returning — CSS inject passes maxBytes=256KiB so
+          // huge stylesheet entries are dropped without keeping the blob.
+          if (blob.size <= 0 || blob.size > maxBytes) {
             disposeMaterializedUrl(book, out, cacheKeys);
             continue;
           }

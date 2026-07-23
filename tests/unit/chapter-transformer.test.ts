@@ -377,6 +377,20 @@ describe("transformChapter sanitizer", () => {
     expect(doc.querySelectorAll("link[data-epub-css]").length).toBe(0);
   });
 
+  it("passes CSS maxBytes into materialize so huge sheets are rejected early", async () => {
+    const doc = parseHtml(
+      `<!DOCTYPE html><html><head>
+        <link rel="stylesheet" data-epub-css="styles/huge.css">
+      </head><body></body></html>`,
+    );
+    const materialize = vi.fn(async (_path: string, options?: { maxBytes?: number }) => {
+      expect(options?.maxBytes).toBeLessThanOrEqual(256 * 1024);
+      return null;
+    });
+    await injectPackageStylesheets(doc, materialize);
+    expect(materialize).toHaveBeenCalled();
+  });
+
   it("normalizes protocol-relative external links for parent open bridge", () => {
     const doc = parseHtml(`<!DOCTYPE html><html><body>
       <a href="//evil.example/out">proto</a>

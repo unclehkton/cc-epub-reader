@@ -46,6 +46,12 @@ async function hasZipMagic(file: Blob): Promise<boolean> {
   return ZIP_LOCAL_FILE_HEADER.every((byte, index) => header[index] === byte);
 }
 
+function hasZipMagicBytes(buffer: ArrayBuffer): boolean {
+  if (buffer.byteLength < 4) return false;
+  const header = new Uint8Array(buffer, 0, 4);
+  return ZIP_LOCAL_FILE_HEADER.every((byte, index) => header[index] === byte);
+}
+
 /**
  * Read a JSZip entry's declared uncompressed size when available.
  * Missing sizes are treated as unknown (0 contribution) rather than trusted.
@@ -279,17 +285,16 @@ function packageSignalsEncryption(opfXml: string): boolean {
 }
 
 /**
- * Validate a local EPUB envelope and extract package metadata.
- * Performs one full-file `arrayBuffer()` read and returns it as `epubBytes`
- * (plus a Blob wrapper for API compatibility). Uses JSZip only — no EPUB.js
- * on the import path (keeps the library shell lean and WebKit-compatible).
+ * Validate an already-read EPUB ArrayBuffer (share-target / single-read path).
+ * Does not copy or re-read the buffer. Returns the same ArrayBuffer as epubBytes.
  */
-export async function validateEpub(
-  file: Blob | null | undefined,
+export async function validateEpubBytes(
+  bytes: ArrayBuffer | null | undefined,
   fileName: string,
+  mimeType: string | undefined = undefined,
   options: ValidateEpubOptions = {},
 ): Promise<ValidatedImport> {
-  if (!file || typeof file.size !== "number") {
+  if (!bytes || !(bytes instanceof ArrayBuffer)) {
     fail("missing-file");
   }
 
@@ -298,28 +303,23 @@ export async function validateEpub(
     options.maxEntryUncompressedBytes ?? MAX_ENTRY_UNCOMPRESSED_BYTES;
   const maxTotalBytes =
     options.maxTotalUncompressedBytes ?? MAX_TOTAL_UNCOMPRESSED_BYTES;
-  // Match assessImport: block at threshold (inclusive), not only above it.
-  if (file.size >= maxBytes) {
+
+  if (bytes.byteLength >= maxBytes) {
     fail("too-large");
   }
 
   const name = fileName || "book.epub";
-  const mimeOk = isAcceptedMime(file.type);
+  const mimeOk = isAcceptedMime(mimeType ?? "");
   const extOk = hasEpubExtension(name);
   if (!mimeOk && !extOk) {
     fail("wrong-type");
   }
 
-  if (!(await hasZipMagic(file))) {
+  if (!hasZipMagicBytes(bytes)) {
     fail("invalid-zip");
   }
 
-  let buffer: ArrayBuffer;
-  try {
-    buffer = await file.arrayBuffer();
-  } catch {
-    fail("invalid-zip");
-  }
+  const buffer = bytes;
 
   try {
     assertZipStructure(buffer);
@@ -336,7 +336,6 @@ export async function validateEpub(
     throw error;
   }
 
-  // Bounded structural checks with JSZip (container, encryption, package path).
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(buffer);
@@ -344,7 +343,6 @@ export async function validateEpub(
     fail("invalid-zip");
   }
 
-  // Best-effort ZIP bomb guard from central-directory declared sizes.
   assertZipExpansionLimits(zip, maxEntryBytes, maxTotalBytes);
 
   const encryption = zip.file("META-INF/encryption.xml");
@@ -357,17 +355,14 @@ export async function validateEpub(
       if (shouldRejectEncryption(encXml)) {
         fail("encrypted");
       }
-      // Font-obfuscation-only: allow import; reader uses system fonts if
-      // deobfuscation is not implemented.
     } catch (error) {
       if (error instanceof ImportError) throw error;
       fail("encrypted");
     }
   }
 
-  // Some DRM packages place rights.xml or META-INF encryption variants.
   if (zip.file("META-INF/rights.xml")) {
-    // Presence alone is not always DRM, but combined with encryption already handled.
+    // Presence alone is not always DRM; encryption already handled above.
   }
 
   const containerFile = zip.file("META-INF/container.xml");
@@ -378,7 +373,6 @@ export async function validateEpub(
   let rootPath: string | undefined;
   try {
     assertEntrySize(containerFile, MAX_METADATA_ENTRY_BYTES);
-    // Stream-bounded read so forged declared sizes cannot expand past ceiling.
     const containerXml = await readZipTextBounded(
       containerFile,
       MAX_METADATA_ENTRY_BYTES,
@@ -422,7 +416,7 @@ export async function validateEpub(
     "Untitled";
   const creator = extractDcText(opfXml, "creator");
 
-  // Reuse the single validated buffer — avoid a second full-file read on import.
+  // Same buffer identity — no second full-file read.
   const epubBlob = new Blob([buffer], { type: "application/epub+zip" });
   const validated: ValidatedImport = {
     fileName: name,
@@ -435,4 +429,44 @@ export async function validateEpub(
   }
 
   return validated;
+}
+
+/**
+ * Validate a local EPUB Blob. Performs one full-file `arrayBuffer()` then
+ * delegates to {@link validateEpubBytes}. Prefer validateEpubBytes when the
+ * ArrayBuffer is already available (share-target).
+ */
+export async function validateEpub(
+  file: Blob | null | undefined,
+  fileName: string,
+  options: ValidateEpubOptions = {},
+): Promise<ValidatedImport> {
+  if (!file || typeof file.size !== "number") {
+    fail("missing-file");
+  }
+
+  const maxBytes = options.maxBytes ?? MAX_EPUB_BYTES;
+  if (file.size >= maxBytes) {
+    fail("too-large");
+  }
+
+  const name = fileName || "book.epub";
+  const mimeOk = isAcceptedMime(file.type);
+  const extOk = hasEpubExtension(name);
+  if (!mimeOk && !extOk) {
+    fail("wrong-type");
+  }
+
+  if (!(await hasZipMagic(file))) {
+    fail("invalid-zip");
+  }
+
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await file.arrayBuffer();
+  } catch {
+    fail("invalid-zip");
+  }
+
+  return validateEpubBytes(buffer, name, file.type, options);
 }

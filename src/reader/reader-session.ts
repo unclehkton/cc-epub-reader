@@ -230,6 +230,12 @@ class ReaderSessionImpl implements ReaderSession {
   private externalLinkDisposer: (() => void) | null = null;
   private readonly converter = new ChapterConverter();
   private transformResult: ChapterTransformResult | null = null;
+  /**
+   * Incoming spine content hook result for a chapter that is not yet settled.
+   * Must not dispose live transform or revoke live chapter URLs until commit.
+   */
+  private pendingTransform: ChapterTransformResult | null = null;
+  private pendingTransformDoc: Document | null = null;
   private spineContentHook: ((...args: unknown[]) => unknown) | null = null;
   private relocatedHandler: ((loc: unknown) => void) | null = null;
   private renderedHandler: ((section: unknown) => void) | null = null;
@@ -357,6 +363,9 @@ class ReaderSessionImpl implements ReaderSession {
         this.emit({ type: "status", status: "idle" });
       } catch (error) {
         if (!this.isCurrent(gen)) return;
+        // Failed navigation must not keep pending incoming resources and must
+        // not have revoked live chapter blobs (hook is pending-only).
+        this.discardPendingTransform();
         await this.rebindCurrentChapter();
         this.emit({
           type: "status",
@@ -411,6 +420,7 @@ class ReaderSessionImpl implements ReaderSession {
         this.emit({ type: "status", status: "idle" });
       } catch (error) {
         if (!this.isCurrent(gen)) return;
+        this.discardPendingTransform();
         await this.rebindCurrentChapter();
         this.emit({
           type: "status",
@@ -482,6 +492,8 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (kind === "same-spine-same-document") {
+      // Incoming hook for same Document is not a chapter change — drop pending.
+      this.discardPendingTransform();
       // Keep converter baseline, revealed images, and chapter URLs.
       // Already bound to this Document with a capture: only refresh overlays —
       // do not dispose gates or re-run OpenCC on every in-chapter page turn.
@@ -513,19 +525,11 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (kind === "same-spine-replaced-document") {
-      // New live DOM for same chapter — rebind; recapture only if needed.
+      // New live DOM for same chapter — commit pending, rebind.
+      this.commitPendingTransform();
       this.clearChapterGestures();
       this.clearParentImageGates();
       this.clearExternalLinkBridge();
-      if (this.transformResult) {
-        try {
-          this.transformResult.dispose();
-        } catch {
-          // ignore
-        }
-        this.transformResult = null;
-      }
-      // New Document: allow a fresh CSS inject flight.
       this.cssInjectState = null;
       if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
         await this.settleChapterDocument(afterDoc, gen, {
@@ -536,18 +540,23 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (kind === "cross-spine") {
-      this.teardownChapter();
+      // Success path: commit pending (revoke old URLs) then settle new chapter.
+      this.commitPendingTransform();
+      this.converter.destroy();
+      this.clearChapterGestures();
+      this.clearParentImageGates();
+      this.clearExternalLinkBridge();
+      this.cssInjectState = null;
+      this.lastBoundDocument = null;
       // Reject the previous chapter Document only when we had a prior location.
-      // First open / resume with no prior location often already exposes the
-      // destination Document via getContents(); rejecting it would wait forever
-      // for a new identity that never arrives (and skip capture/bind).
       await this.afterChapterSettled(gen, {
         rejectDocument: before.location ? before.document : null,
       });
       return;
     }
 
-    // no-transition (boundary or stale): keep chapter usable
+    // no-transition (boundary or stale): keep chapter usable; drop pending only.
+    this.discardPendingTransform();
     await this.rebindCurrentChapter();
   }
 
@@ -1123,12 +1132,39 @@ class ReaderSessionImpl implements ReaderSession {
    */
   private scheduleCssInject(
     doc: Document,
-    materialize: (packagePath: string) => Promise<string | null>,
+    materialize: (
+      packagePath: string,
+      options?: { maxBytes?: number; timeoutMs?: number },
+    ) => Promise<string | null>,
   ): void {
     if (this.cssInjectState?.doc === doc) {
       return;
     }
-    const promise = injectPackageStylesheets(doc, materialize)
+    const gen = this.generation;
+    const matGen = this.chapterMaterializationGeneration;
+    const promise = injectPackageStylesheets(doc, materialize, {
+      isStale: () =>
+        this.destroyed ||
+        gen !== this.generation ||
+        matGen !== this.chapterMaterializationGeneration ||
+        this.cssInjectState?.doc !== doc,
+      revokeUrl: (url) => {
+        try {
+          getRevokeObjectURL()(url);
+        } catch {
+          // ignore
+        }
+        this.chapterObjectUrls.delete(url);
+        this.ownedObjectUrls.delete(url);
+        if (this.book) {
+          try {
+            purgeArchiveUrlCache(this.book, [url]);
+          } catch {
+            // ignore
+          }
+        }
+      },
+    })
       .then(() => {
         if (this.cssInjectState?.doc === doc) {
           this.repositionParentOverlays();
@@ -1646,20 +1682,30 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   private makeMaterialize():
-    | ((packagePath: string) => Promise<string | null>)
+    | ((
+        packagePath: string,
+        options?: { maxBytes?: number; timeoutMs?: number },
+      ) => Promise<string | null>)
     | undefined {
     const book = this.book;
     if (!book) return undefined;
-    return (packagePath: string) => {
+    return (packagePath, options) => {
       const key = packagePath.trim();
       if (!key) return Promise.resolve(null);
 
-      const existing = this.chapterMaterializations.get(key);
+      // Size-capped materializations (CSS) must not share the unbounded cache key
+      // with image reveals (which may legitimately be larger).
+      const cacheKey =
+        options?.maxBytes !== undefined
+          ? `${key}#max=${options.maxBytes}`
+          : key;
+
+      const existing = this.chapterMaterializations.get(cacheKey);
       if (existing) return existing;
 
       const generation = this.chapterMaterializationGeneration;
       let pending!: Promise<string | null>;
-      pending = materializeArchiveUrl(book, key, this.chapterObjectUrls)
+      pending = materializeArchiveUrl(book, key, this.chapterObjectUrls, options)
         .then((url) => {
           const stale =
             this.destroyed ||
@@ -1678,11 +1724,11 @@ class ReaderSessionImpl implements ReaderSession {
           return url;
         })
         .finally(() => {
-          if (this.chapterMaterializations.get(key) === pending) {
-            this.chapterMaterializations.delete(key);
+          if (this.chapterMaterializations.get(cacheKey) === pending) {
+            this.chapterMaterializations.delete(cacheKey);
           }
         });
-      this.chapterMaterializations.set(key, pending);
+      this.chapterMaterializations.set(cacheKey, pending);
       return pending;
     };
   }
@@ -1779,25 +1825,53 @@ class ReaderSessionImpl implements ReaderSession {
       const section = args[1] as { href?: string } | undefined;
       const sectionHref =
         typeof section?.href === "string" ? section.href : undefined;
-      // Dispose previous chapter transform listeners before replacing chapter.
-      if (this.transformResult) {
-        try {
-          this.transformResult.dispose();
-        } catch {
-          // ignore
-        }
-        this.transformResult = null;
-      }
-      this.revokeChapterObjectUrls();
+      // PENDING only — do not dispose live transformResult or revoke live
+      // chapter image blobs. display() may still fail and leave the current
+      // chapter visible; those URLs must stay valid.
+      this.discardPendingTransform();
       const resolve = createArchiveResolver(book, undefined, sectionHref);
       const materialize = this.makeMaterialize();
-      this.transformResult = transformChapter(document, resolve, {
+      this.pendingTransform = transformChapter(document, resolve, {
         materializeArchiveUrl: materialize,
         sectionHref,
       });
+      this.pendingTransformDoc = document;
     };
     this.spineContentHook = hook;
     book.spine.hooks.content.register(hook);
+  }
+
+  /** Drop uncommitted incoming-chapter transform without touching live state. */
+  private discardPendingTransform(): void {
+    if (this.pendingTransform) {
+      try {
+        this.pendingTransform.dispose();
+      } catch {
+        // ignore
+      }
+      this.pendingTransform = null;
+    }
+    this.pendingTransformDoc = null;
+  }
+
+  /**
+   * Commit after successful cross-spine / new-document settlement: tear down
+   * live chapter resources, then adopt pending (or clear if already rebound).
+   */
+  private commitPendingTransform(): void {
+    // Live chapter ends here — safe to revoke revealed-image blobs.
+    if (this.transformResult) {
+      try {
+        this.transformResult.dispose();
+      } catch {
+        // ignore
+      }
+      this.transformResult = null;
+    }
+    this.revokeChapterObjectUrls();
+    // Pending transform listeners were for pre-serial doc; live rebind will
+    // install fresh gates. Dispose pending to avoid double-listeners.
+    this.discardPendingTransform();
   }
 
   private teardownChapter(): void {
@@ -1807,6 +1881,7 @@ class ReaderSessionImpl implements ReaderSession {
     this.clearExternalLinkBridge();
     this.cssInjectState = null;
     this.lastBoundDocument = null;
+    this.discardPendingTransform();
     if (this.transformResult) {
       try {
         this.transformResult.dispose();

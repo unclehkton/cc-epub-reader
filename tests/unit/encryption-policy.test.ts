@@ -112,7 +112,7 @@ describe("classifyEncryptionXml", () => {
   });
 
   it("rejects empty-URI font algorithm even when another font entry exists", () => {
-    const xml = `
+    const xml = `<?xml version="1.0"?><encryption>
       <EncryptedData>
         <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
         <CipherData><CipherReference URI="OEBPS/Fonts/Body.otf"/></CipherData>
@@ -120,7 +120,86 @@ describe("classifyEncryptionXml", () => {
       <EncryptedData>
         <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
         <CipherData></CipherData>
-      </EncryptedData>`;
+      </EncryptedData>
+    </encryption>`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("rejects XML comment decoy font pair when real AES+XHTML follows", () => {
+    // Regex path would match IDPF+decoy.otf inside the comment first.
+    const xml = `<?xml version="1.0"?>
+      <encryption>
+        <EncryptedData>
+          <!--
+            <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+            <CipherReference URI="Fonts/decoy.otf"/>
+          -->
+          <EncryptionMethod
+            Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+          <CipherData>
+            <CipherReference URI="Text/secret.xhtml"/>
+          </CipherData>
+        </EncryptedData>
+      </encryption>`;
+    expect(classifyEncryptionXml(xml).kind).toBe("content-drm");
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("rejects duplicate EncryptionMethod in one EncryptedData block", () => {
+    const xml = `<?xml version="1.0"?><encryption>
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+        <CipherData><CipherReference URI="OEBPS/Fonts/Body.otf"/></CipherData>
+      </EncryptedData>
+    </encryption>`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("rejects duplicate CipherReference in one EncryptedData block", () => {
+    const xml = `<?xml version="1.0"?><encryption>
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <CipherData>
+          <CipherReference URI="OEBPS/Fonts/Body.otf"/>
+          <CipherReference URI="OEBPS/Text/ch1.xhtml"/>
+        </CipherData>
+      </EncryptedData>
+    </encryption>`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("supports namespace-prefixed EncryptedData for font-only packages", () => {
+    const xml = `<?xml version="1.0"?>
+      <enc:encryption xmlns:enc="urn:oasis:names:tc:opendocument:xmlns:container"
+                      xmlns:enc2="http://www.w3.org/2001/04/xmlenc#">
+        <enc:EncryptedData>
+          <enc2:EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+          <enc2:CipherData>
+            <enc2:CipherReference URI="OEBPS/Fonts/Body.otf"/>
+          </enc2:CipherData>
+        </enc:EncryptedData>
+      </enc:encryption>`;
+    expect(classifyEncryptionXml(xml).kind).toBe("font-obfuscation-only");
+  });
+
+  it("rejects malformed XML fail-closed", () => {
+    const xml = `<encryption><EncryptedData><EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"`;
+    expect(shouldRejectEncryption(xml)).toBe(true);
+  });
+
+  it("rejects mix of valid font and malformed EncryptedData block", () => {
+    const xml = `<?xml version="1.0"?><encryption>
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <CipherData><CipherReference URI="OEBPS/Fonts/Body.otf"/></CipherData>
+      </EncryptedData>
+      <EncryptedData>
+        <EncryptionMethod Algorithm="${IDPF_FONT_OBFUSCATION}"/>
+        <EncryptionMethod Algorithm="${ADOBE_FONT_OBFUSCATION}"/>
+        <CipherData><CipherReference URI="OEBPS/Fonts/Other.ttf"/></CipherData>
+      </EncryptedData>
+    </encryption>`;
     expect(shouldRejectEncryption(xml)).toBe(true);
   });
 });

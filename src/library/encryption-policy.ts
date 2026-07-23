@@ -2,8 +2,7 @@
  * Classify META-INF/encryption.xml for Release 0.1.
  * Allow standard EPUB font obfuscation; reject content DRM / unknown algorithms.
  *
- * Pair algorithm + URI per EncryptedData block (never index-align global regex
- * lists — that can mis-pair font algorithms with content URIs).
+ * Uses DOMParser so XML comments cannot decoy algorithm/URI pairs (regex fails closed).
  */
 
 /** IDPF font embedding (obfuscation) algorithm. */
@@ -18,7 +17,7 @@ const FONT_ALGORITHMS = new Set([
   ADOBE_FONT_OBFUSCATION.toLowerCase(),
 ]);
 
-/** True font file extensions only — never substring "font" (bypasses via font-chapter.xhtml). */
+/** True font file extensions only — never substring "font". */
 const FONT_EXT = /\.(otf|ttf|woff2?|eot)(\?|#|$)/i;
 const CONTENT_EXT = /\.(x?html?|xml|opf|ncx|nav|css|js)(\?|#|$)/i;
 const IMAGE_EXT = /\.(jpe?g|png|gif|svg|webp)(\?|#|$)/i;
@@ -32,68 +31,109 @@ export type EncryptionClassification =
 interface EncryptedEntry {
   algo: string;
   uri: string;
+  /** True when the EncryptedData block is structurally invalid. */
+  malformed?: boolean;
+}
+
+function localNameOf(node: Node): string {
+  const el = node as Element;
+  if (typeof el.localName === "string" && el.localName) {
+    return el.localName;
+  }
+  const tag = (el as { tagName?: string }).tagName ?? "";
+  const parts = tag.split(":");
+  return parts[parts.length - 1] ?? tag;
+}
+
+function isParserErrorDocument(doc: Document): boolean {
+  if (doc.getElementsByTagName("parsererror").length > 0) {
+    return true;
+  }
+  // Some engines use namespaced parsererror under html.
+  const root = doc.documentElement;
+  if (root && localNameOf(root).toLowerCase() === "parsererror") {
+    return true;
+  }
+  return false;
 }
 
 /**
- * Extract algorithm + URI pairs from each EncryptedData element.
- * Falls back to whole-document parse when tags are not well-formed.
+ * Collect direct-or-descendant EncryptionMethod / CipherReference under one
+ * EncryptedData, skipping nested EncryptedData subtrees.
  */
-function parseEncryptedEntries(text: string): EncryptedEntry[] {
+function collectBlockChildren(block: Element): {
+  methods: Element[];
+  refs: Element[];
+} {
+  const methods: Element[] = [];
+  const refs: Element[] = [];
+
+  const walk = (node: Element): void => {
+    for (const child of Array.from(node.children)) {
+      const name = localNameOf(child);
+      if (name === "EncryptedData") {
+        // Nested block — do not harvest its methods into the parent.
+        continue;
+      }
+      if (name === "EncryptionMethod") {
+        methods.push(child);
+      } else if (name === "CipherReference") {
+        refs.push(child);
+      } else {
+        walk(child);
+      }
+    }
+  };
+  walk(block);
+  return { methods, refs };
+}
+
+/**
+ * Parse encryption.xml with DOMParser. Fail closed on parse errors and
+ * duplicate/missing method/uri within a block. Comments never contribute nodes.
+ */
+function parseEncryptedEntries(
+  text: string,
+): EncryptedEntry[] | { error: "malformed" } {
+  if (typeof DOMParser === "undefined") {
+    return { error: "malformed" };
+  }
+
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(text, "application/xml");
+  } catch {
+    return { error: "malformed" };
+  }
+
+  if (isParserErrorDocument(doc)) {
+    return { error: "malformed" };
+  }
+
   const entries: EncryptedEntry[] = [];
-  const blockRe = /<EncryptedData\b[\s\S]*?<\/EncryptedData>/gi;
-  let match: RegExpExecArray | null;
-  let foundBlock = false;
+  const all = doc.getElementsByTagName("*");
+  for (const el of Array.from(all)) {
+    if (localNameOf(el) !== "EncryptedData") continue;
 
-  while ((match = blockRe.exec(text)) !== null) {
-    foundBlock = true;
-    const block = match[0];
-    const algoMatch = /EncryptionMethod[^>]*Algorithm\s*=\s*["']([^"']+)["']/i.exec(
-      block,
-    );
-    const uriMatch = /CipherReference[^>]*URI\s*=\s*["']([^"']+)["']/i.exec(
-      block,
-    );
-    entries.push({
-      algo: (algoMatch?.[1] ?? "").trim().toLowerCase(),
-      uri: (uriMatch?.[1] ?? "").trim(),
-    });
-  }
+    const { methods, refs } = collectBlockChildren(el);
 
-  if (foundBlock) {
-    return entries;
+    // Exactly one method and one cipher reference per block.
+    if (methods.length !== 1 || refs.length !== 1) {
+      entries.push({ algo: "", uri: "", malformed: true });
+      continue;
+    }
+
+    const algo = (methods[0]!.getAttribute("Algorithm") ?? "")
+      .trim()
+      .toLowerCase();
+    const uri = (refs[0]!.getAttribute("URI") ?? "").trim();
+    entries.push({ algo, uri });
   }
 
-  const algoMatches = [
-    ...text.matchAll(/EncryptionMethod[^>]*Algorithm\s*=\s*["']([^"']+)["']/gi),
-  ];
-  const uriMatches = [
-    ...text.matchAll(/CipherReference[^>]*URI\s*=\s*["']([^"']+)["']/gi),
-  ];
-  if (algoMatches.length === 1 && uriMatches.length === 1) {
-    return [
-      {
-        algo: (algoMatches[0]![1] ?? "").trim().toLowerCase(),
-        uri: (uriMatches[0]![1] ?? "").trim(),
-      },
-    ];
-  }
-  if (algoMatches.length === 0 && uriMatches.length === 0) {
-    return [];
-  }
-  if (algoMatches.length > 0) {
-    return algoMatches.map((m) => ({
-      algo: (m[1] ?? "").trim().toLowerCase(),
-      uri: "",
-    }));
-  }
-  return uriMatches.map((m) => ({
-    algo: "",
-    uri: (m[1] ?? "").trim(),
-  }));
+  return entries;
 }
 
 function looksLikeFontUri(uri: string): boolean {
-  // Extension-only. Substring "font" is an intentional bypass hole.
   return FONT_EXT.test(uri);
 }
 
@@ -107,12 +147,18 @@ export function classifyEncryptionXml(
     return { kind: "none" };
   }
   const text = String(xml);
-  const entries = parseEncryptedEntries(text);
+  const parsed = parseEncryptedEntries(text);
+
+  if ("error" in parsed) {
+    return { kind: "unknown", reason: "malformed-encryption-xml" };
+  }
+
+  const entries = parsed;
 
   if (entries.length === 0) {
-    if (/EncryptedData/i.test(text)) {
-      return { kind: "unknown", reason: "encrypted-data-without-methods" };
-    }
+    // Well-formed XML with no EncryptedData — treat as none unless text
+    // clearly claimed encryption without parseable blocks (shouldn't happen
+    // after DOM parse of valid XML).
     return { kind: "none" };
   }
 
@@ -121,11 +167,17 @@ export function classifyEncryptionXml(
   let sawUnknown = false;
   let unknownReason = "unclassified-encryption";
 
-  for (const { algo, uri } of entries) {
+  for (const entry of entries) {
+    if (entry.malformed) {
+      sawUnknown = true;
+      unknownReason = "malformed-encrypted-data-block";
+      continue;
+    }
+
+    const { algo, uri } = entry;
     const isFontAlgo = Boolean(algo) && FONT_ALGORITHMS.has(algo);
     const looksLikeFont = looksLikeFontUri(uri);
 
-    // Empty URI: cannot verify resource type — fail closed (never allow via decoy fonts).
     if (!uri) {
       if (isFontAlgo) {
         sawUnknown = true;
@@ -140,19 +192,16 @@ export function classifyEncryptionXml(
       continue;
     }
 
-    // Font obfuscation is allowed ONLY when algorithm AND URI are both fonts.
     if (isFontAlgo && looksLikeFont) {
       fontPaths.push(uri);
       continue;
     }
 
-    // Font algorithm on non-font resource (xhtml, css, image, …).
     if (isFontAlgo && !looksLikeFont) {
       sawContent = true;
       break;
     }
 
-    // Non-font algorithm.
     if (algo && !isFontAlgo) {
       if (CONTENT_EXT.test(uri) || IMAGE_EXT.test(uri) || !looksLikeFont) {
         sawContent = true;
@@ -163,7 +212,6 @@ export function classifyEncryptionXml(
       continue;
     }
 
-    // Missing algorithm
     if (!algo) {
       if (looksLikeFont) {
         sawUnknown = true;
@@ -179,12 +227,13 @@ export function classifyEncryptionXml(
     return { kind: "content-drm", reason: "encrypted-reading-content" };
   }
 
-  // Any unknown/empty-URI entry blocks even when other fonts are present.
+  // Any malformed/unknown block fails closed even when other fonts are valid.
   if (sawUnknown) {
     return { kind: "unknown", reason: unknownReason };
   }
 
   const nonFontAlgos = entries
+    .filter((e) => !e.malformed)
     .map((e) => e.algo)
     .filter((a) => a && !FONT_ALGORITHMS.has(a));
   if (nonFontAlgos.length > 0) {
@@ -194,14 +243,16 @@ export function classifyEncryptionXml(
     };
   }
 
-  // Every entry must be a font-algo + font-extension URI pair.
-  const allFontPairs = entries.every(
-    (e) =>
-      Boolean(e.algo) &&
-      FONT_ALGORITHMS.has(e.algo) &&
-      Boolean(e.uri) &&
-      looksLikeFontUri(e.uri),
-  );
+  const validEntries = entries.filter((e) => !e.malformed);
+  const allFontPairs =
+    validEntries.length > 0 &&
+    validEntries.every(
+      (e) =>
+        Boolean(e.algo) &&
+        FONT_ALGORITHMS.has(e.algo) &&
+        Boolean(e.uri) &&
+        looksLikeFontUri(e.uri),
+    );
 
   if (allFontPairs && fontPaths.length > 0) {
     return {

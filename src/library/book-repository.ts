@@ -169,23 +169,39 @@ function parseShareInboxEntry(value: unknown): ShareInboxEntry | undefined {
     return undefined;
   }
   const record = value as Record<string, unknown>;
-  const epub = epubBytesToBlob(record.epub);
+  const raw = record.epub;
+  const epubBytes =
+    raw instanceof ArrayBuffer
+      ? raw
+      : ArrayBuffer.isView(raw)
+        ? (() => {
+            const view = raw as ArrayBufferView;
+            const copy = new ArrayBuffer(view.byteLength);
+            new Uint8Array(copy).set(
+              new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+            );
+            return copy;
+          })()
+        : undefined;
+  const epub = epubBytesToBlob(raw);
   if (
     !isNonEmptyString(record.id) ||
     !isNonEmptyString(record.fileName) ||
     !isFiniteNumber(record.byteLength) ||
-    !epub ||
+    (!epub && !epubBytes) ||
     !isFiniteNumber(record.receivedAt)
   ) {
     return undefined;
   }
-  return {
+  const entry: ShareInboxEntry = {
     id: record.id,
     fileName: record.fileName,
     byteLength: record.byteLength,
-    epub,
     receivedAt: record.receivedAt,
   };
+  if (epubBytes) entry.epubBytes = epubBytes;
+  if (epub) entry.epub = epub;
+  return entry;
 }
 
 function sortKey(book: BookMeta): number {
@@ -390,7 +406,13 @@ export class BookRepository {
   }
 
   async stageShare(entry: ShareInboxEntry): Promise<void> {
-    const epubBytes = await toStorableEpubBytes(entry.epub);
+    const epubBytes =
+      entry.epubBytes ??
+      (entry.epub
+        ? await toStorableEpubBytes(entry.epub)
+        : (() => {
+            throw new Error("Share inbox entry missing EPUB bytes");
+          })());
     const staged: PersistedShareRecord = {
       id: entry.id,
       fileName: entry.fileName,
