@@ -361,14 +361,23 @@ class ReaderSessionImpl implements ReaderSession {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
+    const prevDoc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    const prevHref = this.location?.spineHref;
+    const prevIndex = this.location?.spineIndex;
     try {
       // Teardown only after navigation succeeds so a failed prev() keeps
       // current-chapter gates/links/conversion alive.
       const rendition = this.requireRendition();
       await rendition.prev();
       if (!this.isCurrent(gen)) return;
+      this.syncLocationFromRendition();
+      const rejectDoc = this.didCrossSpine(prevHref, prevIndex)
+        ? prevDoc
+        : null;
       this.teardownChapter();
-      await this.afterChapterSettled(gen);
+      await this.afterChapterSettled(gen, { rejectDocument: rejectDoc });
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
@@ -389,12 +398,21 @@ class ReaderSessionImpl implements ReaderSession {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
+    const prevDoc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    const prevHref = this.location?.spineHref;
+    const prevIndex = this.location?.spineIndex;
     try {
       const rendition = this.requireRendition();
       await rendition.next();
       if (!this.isCurrent(gen)) return;
+      this.syncLocationFromRendition();
+      const rejectDoc = this.didCrossSpine(prevHref, prevIndex)
+        ? prevDoc
+        : null;
       this.teardownChapter();
-      await this.afterChapterSettled(gen);
+      await this.afterChapterSettled(gen, { rejectDocument: rejectDoc });
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
@@ -412,7 +430,8 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   resize(): void {
-    // Never call beginOp() — resize must not cancel open/display/next/prev.
+    // Never call beginOp() or rendition.display(cfi) — those races cancel open/nav
+    // or rewound pages when a stale display resolved late.
     if (this.destroyed || !this.rendition) return;
     try {
       this.rendition.resize?.();
@@ -559,8 +578,9 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   /**
-   * Soft geometry rebind: never bumps navigation generation / inflightOps.
-   * Skips while open/nav owns the chapter lifecycle.
+   * Soft geometry rebind after layout: never bumps navigation generation,
+   * never calls rendition.display(cfi) (that rewound pages and could tear down
+   * gates when EPUB.js reused the same Document).
    */
   private scheduleResizeRebind(): void {
     if (this.resizeTimer !== null) {
@@ -574,42 +594,51 @@ class ReaderSessionImpl implements ReaderSession {
     }, 80);
   }
 
+  private cancelResizeRebind(): void {
+    this.resizeToken += 1;
+    if (this.resizeTimer !== null) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+  }
+
   private async runResizeRebind(token: number): Promise<void> {
     if (this.destroyed || token !== this.resizeToken || !this.rendition) {
       return;
     }
-    // Navigation / open owns settlement — do not redisplay an old CFI over it.
+    // Navigation / open owns settlement — do not fight for the chapter.
     if (this.inflightOps > 0) return;
 
-    const cfi = this.location?.cfi;
-    const staleDoc =
-      readContentsDocument(this.rendition) ||
-      readIframeDocument(this.element);
     try {
-      await this.rendition.display(cfi);
-      if (
-        this.destroyed ||
-        token !== this.resizeToken ||
-        this.inflightOps > 0 ||
-        !this.rendition
-      ) {
+      // Re-attach gates/gestures/links on the live document. Same Document
+      // identity after resize is normal and must still rebind.
+      await this.rebindCurrentChapter();
+      if (this.destroyed || token !== this.resizeToken || this.inflightOps > 0) {
         return;
       }
-      this.teardownChapter();
-      // Use current generation without bumping — isCurrent stays true unless
-      // a real nav op advanced the counter mid-flight.
-      await this.afterChapterSettled(this.generation, {
-        rejectDocument: staleDoc,
-      });
+      this.repositionParentOverlays();
     } catch {
-      if (
-        !this.destroyed &&
-        token === this.resizeToken &&
-        this.inflightOps === 0
-      ) {
-        await this.rebindCurrentChapter();
-      }
+      // best-effort geometry repair
     }
+  }
+
+  /**
+   * True when location (already synced after next/prev) differs from the
+   * pre-navigation spine snapshot. In-chapter page turns keep the same spine.
+   */
+  private didCrossSpine(
+    prevHref: string | undefined,
+    prevIndex: number | undefined,
+  ): boolean {
+    const href = this.location?.spineHref;
+    const index = this.location?.spineIndex;
+    if (prevIndex !== undefined && index !== undefined && index !== prevIndex) {
+      return true;
+    }
+    if (prevHref && href && prevHref !== href) {
+      return true;
+    }
+    return false;
   }
 
   private async afterChapterSettled(
@@ -619,8 +648,8 @@ class ReaderSessionImpl implements ReaderSession {
     if (!this.isCurrent(gen)) return;
 
     // Only reject a document when the caller knows the section changed
-    // (display/open/setFlow/resize). In-chapter next/prev keeps the same
-    // Document identity — never treat that as stale.
+    // (display/open/setFlow, or next/prev across a spine boundary).
+    // In-chapter next/prev and resize rebind keep the same Document identity.
     const rejectDoc = options?.rejectDocument ?? null;
     let doc: Document | null = null;
     for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -1461,6 +1490,9 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   private beginOp(): number {
+    // Cancel pending/in-flight resize rebind so it cannot rebind or race after
+    // navigation has claimed ownership (token invalidation; no display to cancel).
+    this.cancelResizeRebind();
     this.inflightOps += 1;
     return this.bumpGeneration();
   }

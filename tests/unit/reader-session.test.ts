@@ -431,26 +431,34 @@ describe("ReaderSession generation ownership", () => {
     revokeSpy.mockRestore();
   });
 
-  it("resizes the current rendition without destroying it or bumping nav generation", async () => {
+  it("resizes the current rendition without destroying or redisplaying it", async () => {
     const control = createControl();
-    const { session } = mountSession(control);
+    const { session, events } = mountSession(control);
     await openAndResolve(session, control);
+
+    // Same document identity before and after resize (EPUB.js reuse).
+    const sameDoc = new DOMParser().parseFromString(
+      "<html><body><p>章節文字</p><button type='button' aria-label='點擊顯示圖片'>點擊顯示圖片</button><img data-epub-src='images/a.png' alt='x'></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = sameDoc;
 
     const initialDisplayCount = control.displayCalls.length;
     session.resize();
 
     expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
     expect(control.renditionDestroyed).toBe(false);
-    // Immediate call does not redisplay; soft rebind is debounced.
+    // Resize must never call rendition.display(cfi).
     expect(control.displayCalls).toHaveLength(initialDisplayCount);
 
-    // After debounce, idle soft redisplay may redisplay current CFI once.
-    await new Promise((r) => setTimeout(r, 100));
-    if (control.displayCalls.length > initialDisplayCount) {
-      control.displayCalls[control.displayCalls.length - 1]!.deferred.resolve();
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    expect(control.renditionDestroyed).toBe(false);
+    // Debounced rebind on the same Document must keep gestures live.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(control.displayCalls).toHaveLength(initialDisplayCount);
+
+    events.length = 0;
+    sameDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+
     session.destroy();
   });
 
@@ -493,6 +501,64 @@ describe("ReaderSession generation ownership", () => {
     const afterHref = session.getLocation()?.spineHref;
     expect(afterHref).toBeTruthy();
     expect(afterHref).not.toBe(beforeHref);
+    session.destroy();
+  });
+
+  it("goNext after resize is scheduled wins; resize does not rewind location", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+    const startHref = session.getLocation()?.spineHref;
+    const displaysBefore = control.displayCalls.length;
+
+    // Schedule resize rebind first (idle).
+    session.resize();
+    // Start navigation before debounce fires — beginOp cancels resize token.
+    await new Promise((r) => setTimeout(r, 10));
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next after resize");
+    control.nextCalls[0]!.resolve();
+    await nextPromise;
+
+    // Let former resize debounce window pass; must not call display or rewind.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(control.displayCalls.length).toBe(displaysBefore);
+    expect(session.getLocation()?.spineHref).not.toBe(startHref);
+    session.destroy();
+  });
+
+  it("goNext across spine rejects previous document until the new one is ready", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+
+    const oldDoc = new DOMParser().parseFromString(
+      "<html><body><p data-old='1'>舊章</p></body></html>",
+      "text/html",
+    );
+    const newDoc = new DOMParser().parseFromString(
+      "<html><body><p data-new='1'>新章</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = oldDoc;
+
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next boundary");
+    // After next resolves, keep exposing the previous non-empty document briefly.
+    control.nextCalls[0]!.resolve();
+    setTimeout(() => {
+      control.contentsDocument = newDoc;
+      control.emit("rendered");
+    }, 80);
+
+    await nextPromise;
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
+    expect(control.contentsDocument?.querySelector("[data-new]")).toBeTruthy();
+    // New chapter should accept content-tap on the new document.
+    const events: ReaderEvent[] = [];
+    session.subscribe((e) => events.push(e));
+    newDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
     session.destroy();
   });
 
