@@ -220,7 +220,8 @@ export class BookRepository {
   }
 
   async importBook(input: ValidatedImport): Promise<StoredBook> {
-    const epubBytes = await toStorableEpubBytes(input.epub);
+    const epubBytes =
+      input.epubBytes ?? (await toStorableEpubBytes(input.epub));
     const epub = new Blob([epubBytes], { type: EPUB_MIME });
     const book: StoredBook = {
       id: createId(),
@@ -396,7 +397,8 @@ export class BookRepository {
     id: string,
     validated: ValidatedImport,
   ): Promise<StoredBook> {
-    const epubBytes = await toStorableEpubBytes(validated.epub);
+    const epubBytes =
+      validated.epubBytes ?? (await toStorableEpubBytes(validated.epub));
     const epub = new Blob([epubBytes], { type: EPUB_MIME });
     const book: StoredBook = {
       id: createId(),

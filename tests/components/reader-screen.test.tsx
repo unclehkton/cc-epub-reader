@@ -52,7 +52,7 @@ class FakeSession implements ReaderSession {
   listeners = new Set<(event: ReaderEvent) => void>();
   location: ReaderLocation | null = null;
   destroyed = false;
-  openCalls: Array<{ source: Blob; resumeCfi?: string }> = [];
+  openCalls: Array<{ source: Blob; resume?: string | { cfi?: string } }> = [];
   displayCalls: string[] = [];
   prevCalls = 0;
   nextCalls = 0;
@@ -84,9 +84,13 @@ class FakeSession implements ReaderSession {
     }
   }
 
-  async open(source: Blob, resumeCfi?: string): Promise<BookSummary> {
-    this.openCalls.push({ source, resumeCfi });
+  async open(
+    source: Blob,
+    resume?: string | { cfi?: string; spineHref?: string },
+  ): Promise<BookSummary> {
+    this.openCalls.push({ source, resume });
     this.emit({ type: "status", status: "loading" });
+    const resumeCfi = typeof resume === "string" ? resume : resume?.cfi;
     this.location = makeLocation({
       cfi: resumeCfi ?? "epubcfi(/6/4!/4/2/2)",
     });
@@ -232,7 +236,10 @@ describe("ReaderScreen", () => {
 
     await waitFor(() => {
       expect(sessions.length).toBe(1);
-      expect(sessions[0]!.openCalls[0]?.resumeCfi).toBe("epubcfi(resume)");
+      const resume = sessions[0]!.openCalls[0]?.resume;
+      const cfi =
+        typeof resume === "string" ? resume : resume?.cfi;
+      expect(cfi).toBe("epubcfi(resume)");
     });
 
     // Edge targets + bottom bar both expose prev/next (chrome-independent reading).

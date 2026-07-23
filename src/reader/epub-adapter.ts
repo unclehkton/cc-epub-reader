@@ -7,6 +7,7 @@
  */
 
 import { MAX_ENTRY_UNCOMPRESSED_BYTES } from "../library/epub-validator";
+import { resolvePackagePath } from "./package-path";
 
 export interface AdaptedDisplayedLocation {
   index: number;
@@ -298,12 +299,29 @@ export function buildArchiveUrlMap(book: AdaptedBook): Map<string, string> {
 export function createArchiveResolver(
   book: AdaptedBook,
   _ownedObjectUrls?: Set<string>,
+  sectionHref?: string,
 ): (rawUrl: string) => string | null {
   const map = buildArchiveUrlMap(book);
 
   return (rawUrl: string): string | null => {
     const trimmed = rawUrl.trim();
     if (!trimmed) return null;
+
+    // Prefer section-relative package path resolution when the spine section is known.
+    if (sectionHref) {
+      const packagePath = resolvePackagePath(sectionHref, trimmed);
+      if (packagePath) {
+        const hit = map.get(packagePath);
+        if (hit) return hit;
+        for (const [href, value] of map) {
+          if (href === packagePath || href.endsWith("/" + packagePath)) {
+            return value;
+          }
+        }
+        // Safe package-relative path for later materialization.
+        return packagePath;
+      }
+    }
 
     const direct = map.get(trimmed);
     if (direct) return direct;

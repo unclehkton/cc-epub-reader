@@ -14,6 +14,7 @@
 import type { ConversionMode } from "../domain/types";
 import { ChapterConverter } from "./chapter-converter";
 import {
+  injectPackageStylesheets,
   rebindImageGates,
   transformChapter,
   type ChapterTransformResult,
@@ -950,6 +951,12 @@ class ReaderSessionImpl implements ReaderSession {
     // Touch/click inside the chapter iframe do not bubble to the parent —
     // attach gestures on the live chapter document.
     this.installChapterGestures(doc);
+    // Inject package CSS as sanitized <style> (archive-wide replacements off).
+    if (materialize) {
+      void injectPackageStylesheets(doc, materialize).then(() => {
+        this.repositionParentOverlays();
+      });
+    }
   }
 
   private clearChapterGestures(): void {
@@ -1548,6 +1555,9 @@ class ReaderSessionImpl implements ReaderSession {
       const doc = args[0];
       if (!doc || typeof doc !== "object") return;
       const document = doc as Document;
+      const section = args[1] as { href?: string } | undefined;
+      const sectionHref =
+        typeof section?.href === "string" ? section.href : undefined;
       // Dispose previous chapter transform listeners before replacing chapter.
       if (this.transformResult) {
         try {
@@ -1558,10 +1568,11 @@ class ReaderSessionImpl implements ReaderSession {
         this.transformResult = null;
       }
       this.revokeChapterObjectUrls();
-      const resolve = createArchiveResolver(book);
+      const resolve = createArchiveResolver(book, undefined, sectionHref);
       const materialize = this.makeMaterialize();
       this.transformResult = transformChapter(document, resolve, {
         materializeArchiveUrl: materialize,
+        sectionHref,
       });
     };
     this.spineContentHook = hook;

@@ -35,6 +35,11 @@ export interface ValidatedImport {
   epub: Blob;
   title: string;
   creator?: string;
+  /**
+   * Validated ArrayBuffer from a single full-file read. Prefer this for
+   * persistence and open to avoid Blob→ArrayBuffer round trips.
+   */
+  epubBytes?: ArrayBuffer;
 }
 
 export interface LibraryBook {

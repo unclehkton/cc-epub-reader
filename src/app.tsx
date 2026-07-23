@@ -16,7 +16,10 @@ import { isImportError } from "./library/import-errors";
 import { openDatabase } from "./library/idb";
 import { validateEpub } from "./library/epub-validator";
 import { ReaderScreen } from "./reader/reader-screen";
-import { SettingsRepository } from "./settings/settings-repository";
+import {
+  LatestWinsSettingsRepository,
+  SettingsRepository,
+} from "./settings/settings-repository";
 import {
   deleteShareInboxEntry,
   expireShareInbox,
@@ -382,7 +385,10 @@ class ResilientLibraryRepository implements LibraryRepository {
 export function App() {
   const durableRepository = useMemo(() => new BookRepository(), []);
   const sessionRepository = useMemo(() => new SessionOnlyRepository(), []);
-  const settingsRepository = useMemo(() => new SettingsRepository(), []);
+  const settingsRepository = useMemo(
+    () => new LatestWinsSettingsRepository(new SettingsRepository()),
+    [],
+  );
   const [sessionOnly, setSessionOnly] = useState(false);
   const [sessionOnlyMessage, setSessionOnlyMessage] = useState<string | null>(
     null,

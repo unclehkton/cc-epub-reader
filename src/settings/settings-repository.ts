@@ -126,6 +126,36 @@ export interface SettingsRepositoryLike {
   save(settings: StoredSettings): Promise<void>;
 }
 
+/**
+ * Latest-wins settings writer: rapid saves serialize, and an older in-flight
+ * save cannot overwrite a newer request that finished later.
+ */
+export class LatestWinsSettingsRepository implements SettingsRepositoryLike {
+  private generation = 0;
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(private readonly inner: SettingsRepositoryLike) {}
+
+  get(): Promise<StoredSettings> {
+    return this.inner.get();
+  }
+
+  save(settings: StoredSettings): Promise<void> {
+    this.generation += 1;
+    const gen = this.generation;
+    const run = async () => {
+      if (gen !== this.generation) {
+        // Superseded before start — skip write.
+        return;
+      }
+      await this.inner.save(settings);
+      // If a newer save was queued while we wrote, it runs after us.
+    };
+    this.chain = this.chain.then(run, run);
+    return this.chain;
+  }
+}
+
 export class SettingsRepository implements SettingsRepositoryLike {
   private async withDb<T>(fn: (db: IDBDatabase) => Promise<T>): Promise<T> {
     const db = await openDatabase();

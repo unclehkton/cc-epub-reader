@@ -287,7 +287,11 @@ export function ReaderScreen({
       });
 
       try {
-        const bookSummary = await session.open(book.epub, progress?.cfi);
+        const bookSummary = await session.open(book.epub, {
+          cfi: progress?.cfi,
+          spineHref: progress?.spineHref,
+          approximatePercent: progress?.approximatePercent,
+        });
         if (cancelled) return;
         setSummary(bookSummary);
         setStatus("idle");

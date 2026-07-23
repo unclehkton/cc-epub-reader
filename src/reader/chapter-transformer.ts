@@ -17,6 +17,14 @@ import {
   resolveArchiveSrcset,
   validateRestorableUrl,
 } from "./archive-url";
+import {
+  MAX_AGGREGATE_CSS_BYTES,
+  MAX_SINGLE_CSS_BYTES,
+  MAX_STYLESHEETS_PER_CHAPTER,
+  isPackageStylesheetHref,
+  sanitizePackageCss,
+} from "./css-sanitize";
+import { resolvePackagePath } from "./package-path";
 
 export type { ArchiveResolver };
 
@@ -31,6 +39,8 @@ export interface ChapterTransformResult {
 
 export interface TransformOptions {
   materializeArchiveUrl?: MaterializeArchiveUrl;
+  /** Active spine section href for relative package path resolution. */
+  sectionHref?: string;
 }
 
 /** Cross-realm safe Element cast (iframe nodes fail parent `instanceof`). */
@@ -89,7 +99,7 @@ export function transformChapter(
   stripSrcdoc(document);
   stripEventHandlers(document);
   neutralizeJavascriptUrls(document);
-  stripRemoteStylesheets(document, resolveArchiveUrl);
+  stripRemoteStylesheets(document, resolveArchiveUrl, options.sectionHref);
   sanitizeInlineStyles(document);
   gateImages(document, resolveArchiveUrl, disposers, () => disposed, materialize);
   gateSvgImages(document, resolveArchiveUrl, disposers, () => disposed, materialize);
@@ -483,7 +493,11 @@ function neutralizeJavascriptUrls(doc: Document): void {
   }
 }
 
-function stripRemoteStylesheets(doc: Document, resolve: ArchiveResolver): void {
+function stripRemoteStylesheets(
+  doc: Document,
+  resolve: ArchiveResolver,
+  sectionHref?: string,
+): void {
   for (const link of collectByLocalName(doc, new Set(["link"]))) {
     const rel = (link.getAttribute("rel") || "").toLowerCase();
     const href = link.getAttribute("href");
@@ -499,12 +513,88 @@ function stripRemoteStylesheets(doc: Document, resolve: ArchiveResolver): void {
       continue;
     }
 
-    const safe = resolveArchiveCandidate(href, resolve);
-    if (safe == null) {
+    if (!isPackageStylesheetHref(href)) {
+      link.remove();
+      continue;
+    }
+
+    // Prefer section-relative package path; store for live-document CSS inject.
+    const packagePath =
+      (sectionHref && href
+        ? resolvePackagePath(sectionHref, href)
+        : null) || resolveArchiveCandidate(href, resolve);
+    if (packagePath == null) {
       link.remove();
     } else {
-      link.setAttribute("href", safe);
+      // Do not leave a live href (archive-wide replacements are disabled).
+      // Live rebind materializes and injects sanitized <style>.
+      link.removeAttribute("href");
+      link.setAttribute("data-epub-css", packagePath);
     }
+  }
+}
+
+/**
+ * Materialize package stylesheets marked with data-epub-css and inject as
+ * sanitized <style> into the live chapter document.
+ */
+export async function injectPackageStylesheets(
+  doc: Document,
+  materialize: MaterializeArchiveUrl,
+): Promise<void> {
+  const links = Array.from(
+    doc.querySelectorAll('link[data-epub-css], link[rel~="stylesheet"]'),
+  );
+  let aggregate = 0;
+  let count = 0;
+
+  for (const link of links) {
+    if (count >= MAX_STYLESHEETS_PER_CHAPTER) {
+      link.remove();
+      continue;
+    }
+    const path =
+      link.getAttribute("data-epub-css") ||
+      link.getAttribute("href") ||
+      "";
+    if (!path || !isPackageStylesheetHref(path)) {
+      link.remove();
+      continue;
+    }
+    let url: string | null = null;
+    try {
+      url = await materialize(path);
+    } catch {
+      url = null;
+    }
+    if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
+      link.remove();
+      continue;
+    }
+    let text = "";
+    try {
+      const res = await fetch(url);
+      text = await res.text();
+    } catch {
+      link.remove();
+      continue;
+    }
+    if (text.length > MAX_SINGLE_CSS_BYTES) {
+      link.remove();
+      continue;
+    }
+    aggregate += text.length;
+    if (aggregate > MAX_AGGREGATE_CSS_BYTES) {
+      link.remove();
+      continue;
+    }
+    const style = doc.createElement("style");
+    style.setAttribute("data-epub-injected-css", "1");
+    const media = link.getAttribute("media");
+    if (media) style.setAttribute("media", media);
+    style.textContent = sanitizePackageCss(text);
+    link.replaceWith(style);
+    count += 1;
   }
 }
 

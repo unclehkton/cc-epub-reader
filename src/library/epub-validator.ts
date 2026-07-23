@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import type { ValidatedImport } from "../domain/types";
 import { shouldRejectEncryption } from "./encryption-policy";
 import { ImportError } from "./import-errors";
+import { ZipStructureException, assertZipStructure } from "./zip-structure";
 
 export const MAX_EPUB_BYTES = 100 * 1024 * 1024;
 /** Max uncompressed size for container.xml / package OPF text entries. */
@@ -318,6 +319,21 @@ export async function validateEpub(
     fail("invalid-zip");
   }
 
+  try {
+    assertZipStructure(buffer);
+  } catch (error) {
+    if (error instanceof ZipStructureException) {
+      if (error.code === "zip64" || error.code === "too-many-entries") {
+        fail("too-large");
+      }
+      if (error.code === "traversal" || error.code === "path-too-long") {
+        fail("invalid-zip");
+      }
+      fail("invalid-zip");
+    }
+    throw error;
+  }
+
   // Bounded structural checks with JSZip (container, encryption, package path).
   let zip: JSZip;
   try {
@@ -404,9 +420,12 @@ export async function validateEpub(
     "Untitled";
   const creator = extractDcText(opfXml, "creator");
 
+  // Reuse the single validated buffer — avoid a second full-file read on import.
+  const epubBlob = new Blob([buffer], { type: "application/epub+zip" });
   const validated: ValidatedImport = {
     fileName: name,
-    epub: file,
+    epub: epubBlob,
+    epubBytes: buffer,
     title,
   };
   if (creator !== undefined) {

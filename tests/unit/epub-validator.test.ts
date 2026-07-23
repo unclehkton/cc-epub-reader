@@ -13,7 +13,9 @@ describe("validateEpub", () => {
     expect(result.title).toBe("驗證之書");
     expect(result.creator).toBe("作者甲");
     expect(result.fileName).toBe("sample.epub");
-    expect(result.epub).toBe(epub);
+    expect(result.epub.size).toBe(epub.size);
+    expect(result.epubBytes).toBeInstanceOf(ArrayBuffer);
+    expect(result.epubBytes!.byteLength).toBe(epub.size);
   });
 
   it("accepts application/epub+zip without relying only on extension", async () => {

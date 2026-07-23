@@ -1,4 +1,6 @@
+import { useEffect, useRef } from "preact/hooks";
 import type { ConversionMode, StoredSettings, UiLanguage } from "../domain/types";
+import { installFocusTrap } from "../ui/focus-trap";
 import { t } from "../ui/strings";
 
 export interface SettingsSheetProps {
@@ -83,6 +85,27 @@ export function SettingsSheet({
   conversionError = null,
   onOpenLicenses,
 }: SettingsSheetProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open || !panelRef.current) return;
+    const trap = installFocusTrap(panelRef.current, {
+      initialFocus: closeBtnRef.current,
+    });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      trap.release();
+    };
+  }, [open, onClose]);
+
   if (!open) {
     return null;
   }
@@ -106,6 +129,7 @@ export function SettingsSheet({
         onClick={onClose}
       />
       <div
+        ref={panelRef}
         class="settings-sheet"
         role="dialog"
         aria-modal="true"
@@ -116,6 +140,7 @@ export function SettingsSheet({
             {t(lang, "readingSettings")}
           </h2>
           <button
+            ref={closeBtnRef}
             type="button"
             class="settings-close touch-target"
             style={{ minWidth: "44px", minHeight: "44px" }}
