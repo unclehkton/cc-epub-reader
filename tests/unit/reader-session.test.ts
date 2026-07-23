@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChapterConverter } from "../../src/reader/chapter-converter";
 import {
   createOwnedObjectURL,
   createReaderSession,
@@ -73,6 +74,12 @@ interface FakeControl {
   imageUrl: Deferred<string>;
   /** Override getContents() document for readiness/stale-doc tests. */
   contentsDocument: Document | null;
+  /**
+   * When true, `next()` clears sync location and only exposes the new location
+   * via async currentLocation() — covers Promise path for spine detection.
+   */
+  asyncLocationAfterNext: boolean;
+  asyncLocationDeferred: Deferred<AdaptedLocation | undefined> | null;
   emit(event: string, payload?: unknown): void;
   setLocation(partial: Partial<AdaptedLocation["start"]> & { cfi: string }): void;
 }
@@ -123,13 +130,33 @@ function createFakeFactory(control: FakeControl): EpubFactory {
           const cur = control.location?.start.index ?? 0;
           const nextIdx = Math.min(cur + 1, control.sections.length - 1);
           const section = control.sections[nextIdx]!;
-          control.setLocation({
-            cfi: `epubcfi(/6/4[${section.href}]!/4/2/2)`,
-            href: section.href,
-            index: nextIdx,
-          });
-          rendition.location = control.location;
-          control.emit("relocated", control.location);
+          const href = section.href ?? `ch${nextIdx + 1}.xhtml`;
+          const cfi = `epubcfi(/6/4[${href}]!/4/2/2)`;
+          const nextLoc: AdaptedLocation = {
+            start: {
+              index: nextIdx,
+              href,
+              cfi,
+              displayed: { page: 1, total: 4 },
+            },
+            end: {
+              index: nextIdx,
+              href,
+              cfi,
+              displayed: { page: 1, total: 4 },
+            },
+          };
+          if (control.asyncLocationAfterNext) {
+            // Sync location intentionally stale / cleared until promise resolves.
+            control.location = null;
+            rendition.location = null;
+            control.asyncLocationDeferred = deferred<AdaptedLocation | undefined>();
+            control.asyncLocationDeferred.resolve(nextLoc);
+          } else {
+            control.location = nextLoc;
+            rendition.location = nextLoc;
+            control.emit("relocated", nextLoc);
+          }
         });
       },
       prev() {
@@ -180,6 +207,9 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         };
       },
       currentLocation() {
+        if (control.asyncLocationAfterNext && control.asyncLocationDeferred) {
+          return control.asyncLocationDeferred.promise;
+        }
         return control.location ?? undefined;
       },
     };
@@ -266,6 +296,8 @@ function createControl(): FakeControl {
     imageCreateCalls: [],
     imageUrl: deferred<string>(),
     contentsDocument: null,
+    asyncLocationAfterNext: false,
+    asyncLocationDeferred: null,
     emit(event, payload) {
       const set = control.listeners.get(event);
       if (!set) return;
@@ -462,6 +494,37 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
+  it("resize rebind does not recapture original text baseline", async () => {
+    const captureSpy = vi.spyOn(ChapterConverter.prototype, "capture");
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><p class='body'>汉语</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+
+    await openAndResolve(session, control);
+    const capturesAfterOpen = captureSpy.mock.calls.length;
+    expect(capturesAfterOpen).toBeGreaterThanOrEqual(1);
+
+    await session.setConversion("traditional");
+    // Resize must rebind gates/gestures without calling capture again.
+    session.resize();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(captureSpy.mock.calls.length).toBe(capturesAfterOpen);
+
+    // Failed navigation rebind path also must not recapture.
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next for rebind");
+    control.nextCalls[0]!.reject(new Error("nav failed"));
+    await expect(nextPromise).rejects.toThrow(/nav failed/);
+    expect(captureSpy.mock.calls.length).toBe(capturesAfterOpen);
+
+    captureSpy.mockRestore();
+    session.destroy();
+  });
+
   it("resize during open does not supersede open", async () => {
     const control = createControl();
     const { session } = mountSession(control);
@@ -527,11 +590,70 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
-  it("goNext across spine rejects previous document until the new one is ready", async () => {
+  it("goNext with async currentLocation still detects spine change", async () => {
     const control = createControl();
+    control.asyncLocationAfterNext = true;
+    const oldDoc = new DOMParser().parseFromString(
+      "<html><body><p data-old='1'>舊</p></body></html>",
+      "text/html",
+    );
+    const newDoc = new DOMParser().parseFromString(
+      "<html><body><p data-new='1'>新</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = oldDoc;
     const { session } = mountSession(control);
     await openAndResolve(session, control);
 
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "async loc next");
+    control.nextCalls[0]!.resolve();
+    setTimeout(() => {
+      control.contentsDocument = newDoc;
+      control.emit("rendered");
+    }, 40);
+    await nextPromise;
+
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
+    expect(session.getLocation()?.spineIndex).toBe(1);
+    session.destroy();
+  });
+
+  it("late rendered after settle timeout still binds chapter controls", async () => {
+    const control = createControl();
+    const oldDoc = new DOMParser().parseFromString(
+      "<html><body><p data-old='1'>舊</p></body></html>",
+      "text/html",
+    );
+    const newDoc = new DOMParser().parseFromString(
+      "<html><body><p data-new='1'>新章</p></body></html>",
+      "text/html",
+    );
+    // Bind first chapter on a stable document so lastBoundDocument === oldDoc.
+    control.contentsDocument = oldDoc;
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+
+    const displayPromise = session.display("ch2.xhtml");
+    await waitFor(() => control.displayCalls.length >= 2, "late display");
+    control.displayCalls[control.displayCalls.length - 1]!.deferred.resolve();
+
+    // Keep returning the rejected old document past the ~1.2s settle window.
+    await displayPromise;
+
+    // Now the real document appears after timeout — rendered must late-rebind.
+    control.contentsDocument = newDoc;
+    control.emit("rendered");
+    await new Promise((r) => setTimeout(r, 100));
+
+    events.length = 0;
+    newDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+    session.destroy();
+  });
+
+  it("goNext across spine rejects previous document until the new one is ready", async () => {
+    const control = createControl();
     const oldDoc = new DOMParser().parseFromString(
       "<html><body><p data-old='1'>舊章</p></body></html>",
       "text/html",
@@ -541,6 +663,8 @@ describe("ReaderSession generation ownership", () => {
       "text/html",
     );
     control.contentsDocument = oldDoc;
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
 
     const nextPromise = session.goNext();
     await waitFor(() => control.nextCalls.length >= 1, "next boundary");
@@ -593,9 +717,6 @@ describe("ReaderSession generation ownership", () => {
 
   it("after display settles, only the new contents document is bound", async () => {
     const control = createControl();
-    const { session } = mountSession(control);
-    await openAndResolve(session, control);
-
     const oldDoc = new DOMParser().parseFromString(
       "<html><body><p>舊章</p></body></html>",
       "text/html",
@@ -605,6 +726,8 @@ describe("ReaderSession generation ownership", () => {
       "text/html",
     );
     control.contentsDocument = oldDoc;
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
 
     const displayPromise = session.display("ch2.xhtml");
     await waitFor(() => control.displayCalls.length >= 2, "display ch2");

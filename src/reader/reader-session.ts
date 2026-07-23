@@ -163,6 +163,11 @@ class ReaderSessionImpl implements ReaderSession {
   /** Bumps on EPUB.js `rendered`; used to reject stale chapter documents. */
   private renderEpoch = 0;
   private pendingRenderWaiters: Array<() => void> = [];
+  /**
+   * When afterChapterSettled times out before a ready document appears, arm
+   * a one-shot rebind for a later `rendered` event (same generation only).
+   */
+  private pendingLateChapterRebindGen: number | null = null;
   /** Last document that received live bindings (gates/links/gestures). */
   private lastBoundDocument: Document | null = null;
   private chapterGestureDisposer: (() => void) | null = null;
@@ -332,9 +337,9 @@ class ReaderSessionImpl implements ReaderSession {
     this.emit({ type: "status", status: "loading" });
     // Do not teardown before navigation succeeds — a bad TOC href must keep
     // current-chapter gates/links/conversion alive (same pattern as next/prev).
-    const staleDoc =
-      readContentsDocument(this.rendition) ||
-      readIframeDocument(this.element);
+    // Only reject a previously *bound* document — never the live contents
+    // probe, which may be the same Document identity after a successful display.
+    const staleDoc = this.lastBoundDocument;
     try {
       const rendition = this.requireRendition();
       await rendition.display(target);
@@ -361,9 +366,7 @@ class ReaderSessionImpl implements ReaderSession {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
-    const prevDoc =
-      readContentsDocument(this.rendition) ||
-      readIframeDocument(this.element);
+    const prevDoc = this.lastBoundDocument;
     const prevHref = this.location?.spineHref;
     const prevIndex = this.location?.spineIndex;
     try {
@@ -372,7 +375,12 @@ class ReaderSessionImpl implements ReaderSession {
       const rendition = this.requireRendition();
       await rendition.prev();
       if (!this.isCurrent(gen)) return;
-      this.syncLocationFromRendition();
+      const nextLoc = await this.readLocationFromRendition();
+      if (!this.isCurrent(gen)) return;
+      if (nextLoc) {
+        this.location = nextLoc;
+        this.emit({ type: "location", location: nextLoc });
+      }
       const rejectDoc = this.didCrossSpine(prevHref, prevIndex)
         ? prevDoc
         : null;
@@ -398,16 +406,19 @@ class ReaderSessionImpl implements ReaderSession {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
-    const prevDoc =
-      readContentsDocument(this.rendition) ||
-      readIframeDocument(this.element);
+    const prevDoc = this.lastBoundDocument;
     const prevHref = this.location?.spineHref;
     const prevIndex = this.location?.spineIndex;
     try {
       const rendition = this.requireRendition();
       await rendition.next();
       if (!this.isCurrent(gen)) return;
-      this.syncLocationFromRendition();
+      const nextLoc = await this.readLocationFromRendition();
+      if (!this.isCurrent(gen)) return;
+      if (nextLoc) {
+        this.location = nextLoc;
+        this.emit({ type: "location", location: nextLoc });
+      }
       const rejectDoc = this.didCrossSpine(prevHref, prevIndex)
         ? prevDoc
         : null;
@@ -543,6 +554,7 @@ class ReaderSessionImpl implements ReaderSession {
       this.resizeTimer = null;
     }
     this.pendingRenderWaiters = [];
+    this.pendingLateChapterRebindGen = null;
     this.listeners.clear();
     this.teardownChapter();
     this.detachRendition();
@@ -567,9 +579,10 @@ class ReaderSessionImpl implements ReaderSession {
     target: string | undefined,
     gen: number,
   ): Promise<void> {
-    const staleDoc =
-      readContentsDocument(this.rendition) ||
-      readIframeDocument(this.element);
+    // Reject only a previously bound chapter document. Using the live contents
+    // Document as staleDoc is wrong when EPUB.js reuses the same identity after
+    // display() — open/setFlow would never capture or bind.
+    const staleDoc = this.lastBoundDocument;
     this.teardownChapter();
     const rendition = this.requireRendition();
     await rendition.display(target);
@@ -671,30 +684,69 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (doc) {
-      this.lastBoundDocument = doc;
-      this.bindLiveChapterDocument(doc);
-
-      this.converter.capture(doc);
-      try {
-        // Use conversion generation so apply is not tied to nav gen races.
-        this.conversionGeneration += 1;
-        const convGen = this.conversionGeneration;
-        await this.converter.apply(this.conversion, convGen);
-      } catch (error) {
-        if (!this.isCurrent(gen)) return;
-        this.emit({
-          type: "conversion-error",
-          message: errorMessage(error),
-        });
-      }
-
-      // Re-bind once more after conversion mutations settle (WebKit srcdoc).
-      if (!this.isCurrent(gen)) return;
-      this.bindLiveChapterDocument(doc);
+      this.pendingLateChapterRebindGen = null;
+      await this.settleChapterDocument(doc, gen, { forceCapture: true });
+    } else if (this.isCurrent(gen)) {
+      // Chapter may still be rendering; arm one-shot repair on later `rendered`.
+      this.pendingLateChapterRebindGen = gen;
     }
 
     if (!this.isCurrent(gen)) return;
-    this.syncLocationFromRendition();
+    await this.syncLocationFromRenditionAsync();
+  }
+
+  /**
+   * Bind gates/gestures and apply conversion for a ready chapter document.
+   * @param forceCapture when true, always recapture originals (new chapter).
+   *   when false, preserve existing original map if already captured for `doc`.
+   */
+  private async settleChapterDocument(
+    doc: Document,
+    gen: number,
+    options: { forceCapture: boolean },
+  ): Promise<void> {
+    if (!this.isCurrent(gen)) return;
+    this.lastBoundDocument = doc;
+    this.bindLiveChapterDocument(doc);
+
+    if (options.forceCapture || !this.converter.hasCaptureFor(doc)) {
+      this.converter.capture(doc);
+    }
+
+    try {
+      this.conversionGeneration += 1;
+      const convGen = this.conversionGeneration;
+      await this.converter.apply(this.conversion, convGen);
+    } catch (error) {
+      if (!this.isCurrent(gen)) return;
+      this.emit({
+        type: "conversion-error",
+        message: errorMessage(error),
+      });
+    }
+
+    if (!this.isCurrent(gen)) return;
+    // Re-bind once more after conversion mutations settle (WebKit srcdoc).
+    this.bindLiveChapterDocument(doc);
+  }
+
+  private async lateChapterRebind(gen: number): Promise<void> {
+    if (!this.isCurrent(gen) || this.destroyed) return;
+    const candidate =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    if (!isChapterDocumentReady(candidate, this.rendition) || !candidate) {
+      // Still empty — keep arming for a later rendered event.
+      if (this.isCurrent(gen)) {
+        this.pendingLateChapterRebindGen = gen;
+      }
+      return;
+    }
+    this.pendingLateChapterRebindGen = null;
+    // New document path: must capture originals from the real chapter text.
+    await this.settleChapterDocument(candidate, gen, { forceCapture: true });
+    if (!this.isCurrent(gen)) return;
+    await this.syncLocationFromRenditionAsync();
   }
 
   private waitForNextRender(timeoutMs: number): Promise<void> {
@@ -714,21 +766,20 @@ class ReaderSessionImpl implements ReaderSession {
     });
   }
 
-  /** Re-attach gates/links/converter capture for the still-visible chapter. */
+  /**
+   * Re-attach gates/links/gestures for the still-visible chapter.
+   * Does NOT recapture originals when the same document is already captured —
+   * that would bake converted text in as the new “原文” baseline.
+   */
   private async rebindCurrentChapter(): Promise<void> {
     const doc =
       readContentsDocument(this.rendition) ||
       readIframeDocument(this.element);
     if (!doc || !isChapterDocumentReady(doc, this.rendition)) return;
-    this.bindLiveChapterDocument(doc);
-    this.converter.capture(doc);
-    try {
-      this.conversionGeneration += 1;
-      await this.converter.apply(this.conversion, this.conversionGeneration);
-    } catch {
-      // best-effort
-    }
-    this.syncLocationFromRendition();
+    await this.settleChapterDocument(doc, this.generation, {
+      forceCapture: false,
+    });
+    await this.syncLocationFromRenditionAsync();
   }
 
   private bindLiveChapterDocument(doc: Document): void {
@@ -1292,6 +1343,17 @@ class ReaderSessionImpl implements ReaderSession {
           // ignore
         }
       }
+      // Late repair: chapter finished rendering after settle polling timed out.
+      const lateGen = this.pendingLateChapterRebindGen;
+      if (
+        lateGen !== null &&
+        lateGen === this.generation &&
+        !this.destroyed &&
+        this.rendition === rendition
+      ) {
+        this.pendingLateChapterRebindGen = null;
+        void this.lateChapterRebind(lateGen);
+      }
     };
     rendition.on("rendered", this.renderedHandler);
   }
@@ -1432,7 +1494,46 @@ class ReaderSessionImpl implements ReaderSession {
     }
   }
 
+  /**
+   * Resolve the current location, awaiting Promise-returning currentLocation().
+   * Callers that branch on spine changes (next/prev) must use this, not the
+   * fire-and-forget sync helper.
+   */
+  private async readLocationFromRendition(): Promise<ReaderLocation | null> {
+    const rendition = this.rendition;
+    if (!rendition) return null;
+
+    const raw = rendition.location ?? null;
+    if (raw) {
+      return mapLocation(raw, this.spineCount);
+    }
+
+    const current = rendition.currentLocation?.();
+    if (!current) return null;
+
+    if (typeof (current as Promise<unknown>).then === "function") {
+      try {
+        const loc = await (current as Promise<AdaptedLocation | undefined>);
+        if (!loc) return null;
+        return mapLocation(loc, this.spineCount);
+      } catch {
+        return null;
+      }
+    }
+
+    return mapLocation(current as AdaptedLocation, this.spineCount);
+  }
+
+  private async syncLocationFromRenditionAsync(): Promise<void> {
+    const mapped = await this.readLocationFromRendition();
+    if (!mapped || this.destroyed) return;
+    this.location = mapped;
+    this.emit({ type: "location", location: mapped });
+  }
+
   private syncLocationFromRendition(): void {
+    // Sync path used from sync contexts (relocated handler). Prefer sync
+    // location field; async currentLocation is still fire-and-forget here.
     const rendition = this.rendition;
     if (!rendition) return;
     const gen = this.generation;
@@ -1447,11 +1548,9 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
-    // Some fakes / epub builds expose currentLocation() only.
     const current = rendition.currentLocation?.();
     if (current && typeof (current as Promise<unknown>).then === "function") {
       void (current as Promise<AdaptedLocation | undefined>).then((loc) => {
-        // Drop stale async location reads from a prior chapter/generation.
         if (this.destroyed || !this.isCurrent(gen) || this.rendition !== rendition) {
           return;
         }
@@ -1493,6 +1592,8 @@ class ReaderSessionImpl implements ReaderSession {
     // Cancel pending/in-flight resize rebind so it cannot rebind or race after
     // navigation has claimed ownership (token invalidation; no display to cancel).
     this.cancelResizeRebind();
+    // Invalidate any late-render repair armed for a previous chapter.
+    this.pendingLateChapterRebindGen = null;
     this.inflightOps += 1;
     return this.bumpGeneration();
   }

@@ -94,6 +94,37 @@ describe("ChapterConverter", () => {
     converter.destroy();
   });
 
+  it("hasCaptureFor is true only while originals exist for the same root", () => {
+    const root = mount(`<p class="body">后台</p>`);
+    const converter = new ChapterConverter();
+    expect(converter.hasCaptureFor(root)).toBe(false);
+    converter.capture(root);
+    expect(converter.hasCaptureFor(root)).toBe(true);
+    converter.destroy();
+    expect(converter.hasCaptureFor(root)).toBe(false);
+  });
+
+  it("recapture after convert would poison originals; re-apply without recapture restores 原文", async () => {
+    const root = mount(`<p class="body">汉语</p>`);
+    const converter = new ChapterConverter();
+    converter.capture(root);
+
+    await converter.apply("traditional", 1);
+    expect(textContentOf(root, ".body")).toBe("漢語");
+
+    // Bug pattern: recapture while converted text is on screen.
+    const poisoned = new ChapterConverter();
+    poisoned.capture(root);
+    await poisoned.apply("original", 2);
+    expect(textContentOf(root, ".body")).toBe("漢語"); // cannot restore true SC
+    poisoned.destroy();
+
+    // Correct pattern: keep first capture and re-apply original.
+    await converter.apply("original", 3);
+    expect(textContentOf(root, ".body")).toBe("汉语");
+    converter.destroy();
+  });
+
   it("excludes script, style, code, pre, SVG metadata, and non-visible nodes", async () => {
     const root = mount(`
       <p class="visible">汉语</p>

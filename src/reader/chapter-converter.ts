@@ -33,6 +33,15 @@ export class ChapterConverter {
   private root: ParentNode | null = null;
 
   /**
+   * True when this converter already holds an original-text map for `root`.
+   * Rebinding the same chapter must not recapture (converted text would become
+   * the new “original” and true 原文 could never restore).
+   */
+  hasCaptureFor(root: ParentNode): boolean {
+    return this.root === root && this.originals.size > 0;
+  }
+
+  /**
    * Walk `root` and record eligible visible text nodes for later conversion.
    * Replaces any previous capture for this converter instance.
    */
