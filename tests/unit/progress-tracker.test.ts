@@ -71,6 +71,26 @@ describe("ProgressTracker", () => {
     tracker.destroy();
   });
 
+  it("flushBestEffort swallows save rejections without unhandled rejection", async () => {
+    const save = vi.fn(async () => {
+      throw new Error("QuotaExceededError");
+    });
+    const tracker = createProgressTracker({
+      bookId: "book-1",
+      save,
+    });
+    tracker.onRelocated(location({ cfi: "cfi-2", approximatePercent: 40 }));
+
+    tracker.flushBestEffort();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(save).toHaveBeenCalled();
+    expect(tracker.getPending()?.cfi).toBe("cfi-2");
+    tracker.destroy();
+  });
+
   it("drains pending progress written during an in-flight save", async () => {
     const saves: string[] = [];
     let releaseFirst!: () => void;

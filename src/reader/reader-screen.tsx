@@ -85,6 +85,12 @@ export function ReaderScreen({
   } | null>(null);
   /** Suppress host click (chrome toggle) after a swipe page turn. */
   const suppressClickRef = useRef(false);
+  const chromeGateRef = useRef({
+    settingsOpen: false,
+    licensesOpen: false,
+    tocOpen: false,
+    sidePanel: false,
+  });
 
   const [settings, setSettings] = useState<StoredSettings>({
     ...DEFAULT_SETTINGS,
@@ -122,10 +128,19 @@ export function ReaderScreen({
   }, [settings]);
 
   useEffect(() => {
+    chromeGateRef.current = {
+      settingsOpen,
+      licensesOpen,
+      tocOpen,
+      sidePanel,
+    };
+  }, [settingsOpen, licensesOpen, tocOpen, sidePanel]);
+
+  useEffect(() => {
     const detach = tracker.attachLifecycle(window);
     return () => {
       detach();
-      void tracker.flush();
+      tracker.flushBestEffort();
       tracker.destroy();
     };
   }, [tracker]);
@@ -258,6 +273,16 @@ export function ReaderScreen({
                 ? "字体转换失败，已还原原文。"
                 : "字體轉換失敗，已還原原文。"),
           );
+        } else if (event.type === "content-tap") {
+          // Chapter iframe taps do not bubble to the parent host.
+          const gate = chromeGateRef.current;
+          if (
+            !gate.settingsOpen &&
+            !gate.licensesOpen &&
+            !(gate.tocOpen && !gate.sidePanel)
+          ) {
+            setChromeVisible((v) => !v);
+          }
         }
       });
 

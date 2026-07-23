@@ -34,6 +34,7 @@ import {
   type EpubFactory,
   type RenditionCreateOptions,
 } from "./epub-adapter";
+import { classifySwipe } from "./swipe";
 
 export interface ReaderLocation {
   cfi: string;
@@ -63,7 +64,9 @@ export interface AppearanceSettings {
 export type ReaderEvent =
   | { type: "location"; location: ReaderLocation }
   | { type: "status"; status: "idle" | "loading" | "error"; message?: string }
-  | { type: "conversion-error"; message: string };
+  | { type: "conversion-error"; message: string }
+  /** Tap on chapter content (iframe) — chrome toggle, not a link/button. */
+  | { type: "content-tap" };
 
 export interface ReaderSession {
   open(source: Blob, resumeCfi?: string): Promise<BookSummary>;
@@ -154,6 +157,15 @@ class ReaderSessionImpl implements ReaderSession {
   private generation = 0;
   /** Separate from navigation generation so OpenCC never aborts page turns. */
   private conversionGeneration = 0;
+  /** Debounce token for geometry rebind — never shares nav generation. */
+  private resizeToken = 0;
+  private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Bumps on EPUB.js `rendered`; used to reject stale chapter documents. */
+  private renderEpoch = 0;
+  private pendingRenderWaiters: Array<() => void> = [];
+  /** Last document that received live bindings (gates/links/gestures). */
+  private lastBoundDocument: Document | null = null;
+  private chapterGestureDisposer: (() => void) | null = null;
   private destroyed = false;
   private location: ReaderLocation | null = null;
   private conversion: ConversionMode;
@@ -318,12 +330,22 @@ class ReaderSessionImpl implements ReaderSession {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
+    // Do not teardown before navigation succeeds — a bad TOC href must keep
+    // current-chapter gates/links/conversion alive (same pattern as next/prev).
+    const staleDoc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
     try {
-      await this.displayInternal(target, gen);
+      const rendition = this.requireRendition();
+      await rendition.display(target);
+      if (!this.isCurrent(gen)) return;
+      this.teardownChapter();
+      await this.afterChapterSettled(gen, { rejectDocument: staleDoc });
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
       if (!this.isCurrent(gen)) return;
+      await this.rebindCurrentChapter();
       this.emit({
         type: "status",
         status: "error",
@@ -390,27 +412,14 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   resize(): void {
-    this.assertAlive();
-    // Rebuild the current page after geometry change; bare resize() can leave
-    // a blank iframe while dragging the browser window.
-    const cfi = this.location?.cfi;
-    this.rendition?.resize?.();
-    void (async () => {
-      const gen = this.beginOp();
-      try {
-        await waitMs(80);
-        if (!this.isCurrent(gen)) return;
-        await this.displayInternal(cfi, gen);
-        if (!this.isCurrent(gen)) return;
-        this.emit({ type: "status", status: "idle" });
-      } catch {
-        if (this.isCurrent(gen)) {
-          await this.rebindCurrentChapter();
-        }
-      } finally {
-        this.endOp();
-      }
-    })();
+    // Never call beginOp() — resize must not cancel open/display/next/prev.
+    if (this.destroyed || !this.rendition) return;
+    try {
+      this.rendition.resize?.();
+    } catch {
+      // ignore geometry probe failures
+    }
+    this.scheduleResizeRebind();
   }
 
   async setFlow(flow: "paginated" | "scrolled"): Promise<void> {
@@ -509,6 +518,12 @@ class ReaderSessionImpl implements ReaderSession {
     this.bumpGeneration();
     this.destroyed = true;
     this.inflightOps = 0;
+    this.resizeToken += 1;
+    if (this.resizeTimer !== null) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = null;
+    }
+    this.pendingRenderWaiters = [];
     this.listeners.clear();
     this.teardownChapter();
     this.detachRendition();
@@ -518,41 +533,116 @@ class ReaderSessionImpl implements ReaderSession {
     this.book = null;
     this.rendition = null;
     this.factory = null;
+    this.lastBoundDocument = null;
   }
 
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
 
+  /**
+   * Open/setFlow path: may teardown first because there is no user-visible
+   * chapter that must survive a failed hop (or the caller already tore down).
+   */
   private async displayInternal(
     target: string | undefined,
     gen: number,
   ): Promise<void> {
+    const staleDoc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
     this.teardownChapter();
     const rendition = this.requireRendition();
     await rendition.display(target);
     if (!this.isCurrent(gen)) return;
-    await this.afterChapterSettled(gen);
+    await this.afterChapterSettled(gen, { rejectDocument: staleDoc });
   }
 
-  private async afterChapterSettled(gen: number): Promise<void> {
+  /**
+   * Soft geometry rebind: never bumps navigation generation / inflightOps.
+   * Skips while open/nav owns the chapter lifecycle.
+   */
+  private scheduleResizeRebind(): void {
+    if (this.resizeTimer !== null) {
+      clearTimeout(this.resizeTimer);
+    }
+    this.resizeToken += 1;
+    const token = this.resizeToken;
+    this.resizeTimer = setTimeout(() => {
+      this.resizeTimer = null;
+      void this.runResizeRebind(token);
+    }, 80);
+  }
+
+  private async runResizeRebind(token: number): Promise<void> {
+    if (this.destroyed || token !== this.resizeToken || !this.rendition) {
+      return;
+    }
+    // Navigation / open owns settlement — do not redisplay an old CFI over it.
+    if (this.inflightOps > 0) return;
+
+    const cfi = this.location?.cfi;
+    const staleDoc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    try {
+      await this.rendition.display(cfi);
+      if (
+        this.destroyed ||
+        token !== this.resizeToken ||
+        this.inflightOps > 0 ||
+        !this.rendition
+      ) {
+        return;
+      }
+      this.teardownChapter();
+      // Use current generation without bumping — isCurrent stays true unless
+      // a real nav op advanced the counter mid-flight.
+      await this.afterChapterSettled(this.generation, {
+        rejectDocument: staleDoc,
+      });
+    } catch {
+      if (
+        !this.destroyed &&
+        token === this.resizeToken &&
+        this.inflightOps === 0
+      ) {
+        await this.rebindCurrentChapter();
+      }
+    }
+  }
+
+  private async afterChapterSettled(
+    gen: number,
+    options?: { rejectDocument?: Document | null },
+  ): Promise<void> {
     if (!this.isCurrent(gen)) return;
 
-    // Do not treat bare <body> as ready — empty iframe shells always have body.
+    // Only reject a document when the caller knows the section changed
+    // (display/open/setFlow/resize). In-chapter next/prev keeps the same
+    // Document identity — never treat that as stale.
+    const rejectDoc = options?.rejectDocument ?? null;
     let doc: Document | null = null;
-    for (let attempt = 0; attempt < 25; attempt += 1) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
       const candidate =
         readContentsDocument(this.rendition) ||
         readIframeDocument(this.element);
-      if (isChapterDocumentReady(candidate, this.rendition)) {
+      const isStale = Boolean(rejectDoc && candidate && candidate === rejectDoc);
+      if (
+        !isStale &&
+        isChapterDocumentReady(candidate, this.rendition)
+      ) {
         doc = candidate;
         break;
       }
-      await waitMs(40);
+      // Prefer waiting on the real rendered lifecycle when we still see the
+      // previous document (or an empty shell).
+      await Promise.race([waitMs(40), this.waitForNextRender(50)]);
       if (!this.isCurrent(gen)) return;
     }
 
     if (doc) {
+      this.lastBoundDocument = doc;
       this.bindLiveChapterDocument(doc);
 
       this.converter.capture(doc);
@@ -576,6 +666,23 @@ class ReaderSessionImpl implements ReaderSession {
 
     if (!this.isCurrent(gen)) return;
     this.syncLocationFromRendition();
+  }
+
+  private waitForNextRender(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      this.pendingRenderWaiters.push(finish);
+      setTimeout(() => {
+        const idx = this.pendingRenderWaiters.indexOf(finish);
+        if (idx >= 0) this.pendingRenderWaiters.splice(idx, 1);
+        finish();
+      }, timeoutMs);
+    });
   }
 
   /** Re-attach gates/links/converter capture for the still-visible chapter. */
@@ -606,6 +713,7 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.transformResult = null;
     }
+    this.clearChapterGestures();
     const materialize = this.makeMaterialize();
     this.transformResult = rebindImageGates(doc, {
       materializeArchiveUrl: materialize,
@@ -615,6 +723,98 @@ class ReaderSessionImpl implements ReaderSession {
     // WebKit. Parent-document overlay buttons receive real clicks safely.
     this.installParentImageGates(doc, materialize);
     this.installParentExternalLinks(doc);
+    // Touch/click inside the chapter iframe do not bubble to the parent —
+    // attach gestures on the live chapter document.
+    this.installChapterGestures(doc);
+  }
+
+  private clearChapterGestures(): void {
+    if (this.chapterGestureDisposer) {
+      try {
+        this.chapterGestureDisposer();
+      } catch {
+        // ignore
+      }
+      this.chapterGestureDisposer = null;
+    }
+  }
+
+  /**
+   * Swipe page-turn + content tap (chrome toggle) from inside the EPUB iframe.
+   */
+  private installChapterGestures(doc: Document): void {
+    this.clearChapterGestures();
+    let touchStart: { x: number; y: number; time: number } | null = null;
+    let suppressTap = false;
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) {
+        touchStart = null;
+        return;
+      }
+      const touch = event.touches[0]!;
+      touchStart = {
+        x: touch.clientX,
+        y: touch.clientY,
+        time: Date.now(),
+      };
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      const start = touchStart;
+      touchStart = null;
+      if (!start || event.changedTouches.length === 0) return;
+      if (this.flow !== "paginated") return;
+      const touch = event.changedTouches[0]!;
+      const direction = classifySwipe({
+        startX: start.x,
+        startY: start.y,
+        endX: touch.clientX,
+        endY: touch.clientY,
+        durationMs: Date.now() - start.time,
+      });
+      if (!direction) return;
+      suppressTap = true;
+      if (direction === "left") {
+        void this.goNext().catch(() => {
+          // status already emitted
+        });
+      } else {
+        void this.goPrevious().catch(() => {
+          // status already emitted
+        });
+      }
+    };
+
+    const onTouchCancel = () => {
+      touchStart = null;
+    };
+
+    const onClick = (event: Event) => {
+      if (suppressTap) {
+        suppressTap = false;
+        return;
+      }
+      const target = eventTargetElement(event.target);
+      if (!target) return;
+      // Ignore interactive chapter controls (gates, anchors).
+      if (closestElement(target, "a, button, input, textarea, select, label")) {
+        return;
+      }
+      this.emit({ type: "content-tap" });
+    };
+
+    doc.addEventListener("touchstart", onTouchStart, { passive: true });
+    doc.addEventListener("touchend", onTouchEnd, { passive: true });
+    doc.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    doc.addEventListener("click", onClick);
+
+    this.chapterGestureDisposer = () => {
+      doc.removeEventListener("touchstart", onTouchStart);
+      doc.removeEventListener("touchend", onTouchEnd);
+      doc.removeEventListener("touchcancel", onTouchCancel);
+      doc.removeEventListener("click", onClick);
+    };
   }
 
   private clearParentOverlaysTimer(): void {
@@ -650,6 +850,26 @@ class ReaderSessionImpl implements ReaderSession {
     button.style.pointerEvents = "none";
   }
 
+  /** Parent overlay owns the control — remove iframe twin from a11y + keyboard. */
+  private hideInFrameGateForParent(inFrameButton: HTMLElement): void {
+    if (inFrameButton.tagName.toLowerCase() !== "button") return;
+    inFrameButton.hidden = true;
+    inFrameButton.setAttribute("aria-hidden", "true");
+    inFrameButton.tabIndex = -1;
+    inFrameButton.style.pointerEvents = "none";
+    inFrameButton.style.opacity = "0";
+  }
+
+  /** Parent overlay off-viewport — restore iframe gate as the sole control. */
+  private showInFrameGateFallback(inFrameButton: HTMLElement): void {
+    if (inFrameButton.tagName.toLowerCase() !== "button") return;
+    inFrameButton.hidden = false;
+    inFrameButton.setAttribute("aria-hidden", "false");
+    inFrameButton.removeAttribute("tabindex");
+    inFrameButton.style.pointerEvents = "auto";
+    inFrameButton.style.opacity = "1";
+  }
+
   private showParentOverlayButton(
     button: HTMLButtonElement,
     left: number,
@@ -682,11 +902,9 @@ class ReaderSessionImpl implements ReaderSession {
           // Do NOT park at stage corner — that produced a floating gate on
           // every section when images were off-page or not laid out yet.
           this.hideParentOverlayButton(pair.button);
-          // Ensure in-frame button remains tappable as fallback.
+          // In-frame button is the only accessible/tappable control.
           try {
-            pair.inFrameButton.hidden = false;
-            pair.inFrameButton.style.pointerEvents = "auto";
-            pair.inFrameButton.style.opacity = "1";
+            this.showInFrameGateFallback(pair.inFrameButton);
           } catch {
             // ignore
           }
@@ -696,10 +914,9 @@ class ReaderSessionImpl implements ReaderSession {
         const top = iframeRect.top + rect.top - 48;
         pair.button.hidden = false;
         this.showParentOverlayButton(pair.button, left, top);
-        // Prefer parent hit target when visible to avoid double activation.
+        // Prefer parent hit target; fully hide in-frame control from a11y tree.
         try {
-          pair.inFrameButton.style.pointerEvents = "none";
-          pair.inFrameButton.style.opacity = "0.01";
+          this.hideInFrameGateForParent(pair.inFrameButton);
         } catch {
           // ignore
         }
@@ -1035,8 +1252,17 @@ class ReaderSessionImpl implements ReaderSession {
     rendition.on("relocated", this.relocatedHandler);
 
     this.renderedHandler = () => {
-      // Chapter DOM replacement: capture is done in afterChapterSettled.
-      // Explicit teardown of previous transform disposers already ran before display.
+      // Signal chapter document replacement so readiness polling can reject
+      // the previous non-empty document and wait for the new one.
+      this.renderEpoch += 1;
+      const waiters = this.pendingRenderWaiters.splice(0);
+      for (const waiter of waiters) {
+        try {
+          waiter();
+        } catch {
+          // ignore
+        }
+      }
     };
     rendition.on("rendered", this.renderedHandler);
   }
@@ -1095,6 +1321,7 @@ class ReaderSessionImpl implements ReaderSession {
 
   private teardownChapter(): void {
     this.converter.destroy();
+    this.clearChapterGestures();
     this.clearParentImageGates();
     this.clearExternalLinkBridge();
     if (this.transformResult) {

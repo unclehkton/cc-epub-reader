@@ -33,13 +33,8 @@ export function classifySwipe(sample: SwipeSample): SwipeDirection {
   const absY = Math.abs(dy);
 
   if (absX < SWIPE_MIN_DISTANCE_PX) return null;
-  if (absY > 0 && absX / absY < 1 / SWIPE_MAX_VERTICAL_RATIO) {
-    // Too vertical relative to horizontal movement.
-    if (absY >= absX * SWIPE_MAX_VERTICAL_RATIO && absY > absX) {
-      return null;
-    }
-  }
-  if (absY > absX) return null;
+  // Reject when vertical drift exceeds the configured share of horizontal travel.
+  if (absY > absX * SWIPE_MAX_VERTICAL_RATIO) return null;
 
   return dx < 0 ? "left" : "right";
 }

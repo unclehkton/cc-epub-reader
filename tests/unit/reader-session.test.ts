@@ -71,6 +71,8 @@ interface FakeControl {
   sections: AdaptedSection[];
   imageCreateCalls: string[];
   imageUrl: Deferred<string>;
+  /** Override getContents() document for readiness/stale-doc tests. */
+  contentsDocument: Document | null;
   emit(event: string, payload?: unknown): void;
   setLocation(partial: Partial<AdaptedLocation["start"]> & { cfi: string }): void;
 }
@@ -117,12 +119,34 @@ function createFakeFactory(control: FakeControl): EpubFactory {
       next() {
         const d = deferred<void>();
         control.nextCalls.push(d);
-        return d.promise;
+        return d.promise.then(() => {
+          const cur = control.location?.start.index ?? 0;
+          const nextIdx = Math.min(cur + 1, control.sections.length - 1);
+          const section = control.sections[nextIdx]!;
+          control.setLocation({
+            cfi: `epubcfi(/6/4[${section.href}]!/4/2/2)`,
+            href: section.href,
+            index: nextIdx,
+          });
+          rendition.location = control.location;
+          control.emit("relocated", control.location);
+        });
       },
       prev() {
         const d = deferred<void>();
         control.prevCalls.push(d);
-        return d.promise;
+        return d.promise.then(() => {
+          const cur = control.location?.start.index ?? 0;
+          const prevIdx = Math.max(cur - 1, 0);
+          const section = control.sections[prevIdx]!;
+          control.setLocation({
+            cfi: `epubcfi(/6/4[${section.href}]!/4/2/2)`,
+            href: section.href,
+            index: prevIdx,
+          });
+          rendition.location = control.location;
+          control.emit("relocated", control.location);
+        });
       },
       resize(width?: number, height?: number) {
         control.resizeCalls.push({ width, height });
@@ -145,6 +169,9 @@ function createFakeFactory(control: FakeControl): EpubFactory {
       flow: vi.fn(),
       clear: vi.fn(),
       getContents() {
+        if (control.contentsDocument) {
+          return { document: control.contentsDocument };
+        }
         return {
           document: new DOMParser().parseFromString(
             "<html><body><p>章節文字</p></body></html>",
@@ -238,6 +265,7 @@ function createControl(): FakeControl {
     ],
     imageCreateCalls: [],
     imageUrl: deferred<string>(),
+    contentsDocument: null,
     emit(event, payload) {
       const set = control.listeners.get(event);
       if (!set) return;
@@ -403,17 +431,131 @@ describe("ReaderSession generation ownership", () => {
     revokeSpy.mockRestore();
   });
 
-  it("resizes the current rendition without destroying or redisplaying it", async () => {
+  it("resizes the current rendition without destroying it or bumping nav generation", async () => {
     const control = createControl();
     const { session } = mountSession(control);
     await openAndResolve(session, control);
 
     const initialDisplayCount = control.displayCalls.length;
-    (session as unknown as { resize(): void }).resize();
+    session.resize();
 
     expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
     expect(control.renditionDestroyed).toBe(false);
+    // Immediate call does not redisplay; soft rebind is debounced.
     expect(control.displayCalls).toHaveLength(initialDisplayCount);
+
+    // After debounce, idle soft redisplay may redisplay current CFI once.
+    await new Promise((r) => setTimeout(r, 100));
+    if (control.displayCalls.length > initialDisplayCount) {
+      control.displayCalls[control.displayCalls.length - 1]!.deferred.resolve();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(control.renditionDestroyed).toBe(false);
+    session.destroy();
+  });
+
+  it("resize during open does not supersede open", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    const openPromise = session.open(
+      new Blob(["epub"], { type: "application/epub+zip" }),
+    );
+    await waitFor(() => control.displayCalls.length >= 1, "open display");
+
+    // Must not call beginOp / cancel open.
+    session.resize();
+    expect(control.resizeCalls.length).toBe(1);
+
+    control.displayCalls[0]!.deferred.resolve();
+    const summary = await openPromise;
+    expect(summary.title).toBe("測試書");
+    session.destroy();
+  });
+
+  it("resize during goNext does not redisplay the previous page over navigation", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+    const beforeHref = session.getLocation()?.spineHref;
+
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next call");
+    const displaysAtNav = control.displayCalls.length;
+
+    session.resize();
+    // Allow resize debounce to fire while nav is in flight — must not redisplay.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(control.displayCalls.length).toBe(displaysAtNav);
+
+    control.nextCalls[0]!.resolve();
+    await nextPromise;
+
+    const afterHref = session.getLocation()?.spineHref;
+    expect(afterHref).toBeTruthy();
+    expect(afterHref).not.toBe(beforeHref);
+    session.destroy();
+  });
+
+  it("failed display rebinds current chapter controls", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    events.length = 0;
+
+    const displayPromise = session.display("missing.xhtml");
+    await waitFor(() => control.displayCalls.length >= 2, "failed display");
+    control.displayCalls[control.displayCalls.length - 1]!.deferred.reject(
+      new Error("bad toc href"),
+    );
+    await expect(displayPromise).rejects.toThrow(/bad toc href/);
+
+    expect(
+      events.some((e) => e.type === "status" && e.status === "error"),
+    ).toBe(true);
+    // Session remains usable — a subsequent display can succeed.
+    const retry = session.display("ch2.xhtml");
+    await waitFor(
+      () => control.displayCalls.some((c) => c.target === "ch2.xhtml"),
+      "retry display",
+    );
+    const ch2 = control.displayCalls.find((c) => c.target === "ch2.xhtml")!;
+    ch2.deferred.resolve();
+    await retry;
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
+    session.destroy();
+  });
+
+  it("after display settles, only the new contents document is bound", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+
+    const oldDoc = new DOMParser().parseFromString(
+      "<html><body><p>舊章</p></body></html>",
+      "text/html",
+    );
+    const newDoc = new DOMParser().parseFromString(
+      "<html><body><p data-new-chapter='1'>新章</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = oldDoc;
+
+    const displayPromise = session.display("ch2.xhtml");
+    await waitFor(() => control.displayCalls.length >= 2, "display ch2");
+    const call = control.displayCalls[control.displayCalls.length - 1]!;
+    call.deferred.resolve();
+
+    // Keep returning the old non-empty document for a few ticks, then swap.
+    setTimeout(() => {
+      control.contentsDocument = newDoc;
+      control.emit("rendered");
+    }, 80);
+
+    await displayPromise;
+    // Location updated for ch2; new document is the bound contents.
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
+    expect(control.contentsDocument?.querySelector("[data-new-chapter]")).toBeTruthy();
+    session.destroy();
   });
 
   it("registers transform only on spine.hooks.content, never rendition.hooks.content", async () => {

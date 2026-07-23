@@ -20,8 +20,13 @@ export interface ProgressTrackerOptions {
 export interface ProgressTracker {
   /** Schedule a debounced persist for the latest location. */
   onRelocated(location: ReaderLocation): void;
-  /** Persist the latest pending progress immediately (best-effort). */
+  /** Persist the latest pending progress immediately (may reject). */
   flush(): Promise<void>;
+  /**
+   * Fire-and-forget flush for lifecycle handlers — never surfaces unhandled
+   * rejections; pending remains for a later retry on failure.
+   */
+  flushBestEffort(): void;
   /**
    * Listen for pagehide / visibilitychange and flush on hide.
    * Returns an unsubscribe function.
@@ -136,6 +141,12 @@ class ProgressTrackerImpl implements ProgressTracker {
     }
   }
 
+  flushBestEffort(): void {
+    void this.flush().catch(() => {
+      // Pending retained for a later retry; never surface unhandled rejections.
+    });
+  }
+
   attachLifecycle(target: Window & typeof globalThis = window): () => void {
     if (this.destroyed) {
       return () => {
@@ -147,11 +158,11 @@ class ProgressTrackerImpl implements ProgressTracker {
     this.detachLifecycle?.();
 
     const onPageHide = (): void => {
-      void this.flush();
+      this.flushBestEffort();
     };
     const onVisibility = (): void => {
       if (document.visibilityState === "hidden") {
-        void this.flush();
+        this.flushBestEffort();
       }
     };
 
@@ -186,7 +197,7 @@ class ProgressTrackerImpl implements ProgressTracker {
     this.clearTimer();
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.flush();
+      this.flushBestEffort();
     }, this.debounceMs);
   }
 

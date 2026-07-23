@@ -62,4 +62,38 @@ describe("classifySwipe", () => {
       }),
     ).toBeNull();
   });
+
+  it("enforces max vertical ratio at the 75% boundary", () => {
+    const horizontal = 100;
+    // 74% vertical → accept
+    expect(
+      classifySwipe({
+        startX: 200,
+        startY: 100,
+        endX: 200 - horizontal,
+        endY: 100 + Math.floor(horizontal * 0.74),
+        durationMs: 200,
+      }),
+    ).toBe("left");
+    // exactly 75% → accept (not greater than)
+    expect(
+      classifySwipe({
+        startX: 200,
+        startY: 100,
+        endX: 200 - horizontal,
+        endY: 100 + horizontal * 0.75,
+        durationMs: 200,
+      }),
+    ).toBe("left");
+    // 76% → reject
+    expect(
+      classifySwipe({
+        startX: 200,
+        startY: 100,
+        endX: 200 - horizontal,
+        endY: 100 + Math.ceil(horizontal * 0.76),
+        durationMs: 200,
+      }),
+    ).toBeNull();
+  });
 });
