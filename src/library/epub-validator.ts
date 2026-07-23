@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import type { ValidatedImport } from "../domain/types";
+import { shouldRejectEncryption } from "./encryption-policy";
 import { ImportError } from "./import-errors";
 
 export const MAX_EPUB_BYTES = 100 * 1024 * 1024;
@@ -330,7 +331,20 @@ export async function validateEpub(
 
   const encryption = zip.file("META-INF/encryption.xml");
   if (encryption) {
-    fail("encrypted");
+    try {
+      const encXml = await readZipTextBounded(
+        encryption,
+        MAX_METADATA_ENTRY_BYTES,
+      );
+      if (shouldRejectEncryption(encXml)) {
+        fail("encrypted");
+      }
+      // Font-obfuscation-only: allow import; reader uses system fonts if
+      // deobfuscation is not implemented.
+    } catch (error) {
+      if (error instanceof ImportError) throw error;
+      fail("encrypted");
+    }
   }
 
   // Some DRM packages place rights.xml or META-INF encryption variants.

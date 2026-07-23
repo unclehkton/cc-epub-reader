@@ -34,7 +34,18 @@ import {
   type EpubFactory,
   type RenditionCreateOptions,
 } from "./epub-adapter";
+import {
+  classifyTransition,
+  locationMeaningfullyChanged,
+  type TransitionSnapshot,
+} from "./location-transition";
 import { classifySwipe } from "./swipe";
+
+export interface ResumeTarget {
+  cfi?: string;
+  spineHref?: string;
+  approximatePercent?: number;
+}
 
 export interface ReaderLocation {
   cfi: string;
@@ -69,7 +80,10 @@ export type ReaderEvent =
   | { type: "content-tap" };
 
 export interface ReaderSession {
-  open(source: Blob, resumeCfi?: string): Promise<BookSummary>;
+  open(
+    source: Blob | ArrayBuffer,
+    resume?: string | ResumeTarget,
+  ): Promise<BookSummary>;
   display(target?: string): Promise<void>;
   goPrevious(): Promise<void>;
   goNext(): Promise<void>;
@@ -244,11 +258,15 @@ class ReaderSessionImpl implements ReaderSession {
     return this.persistence;
   }
 
-  async open(source: Blob, resumeCfi?: string): Promise<BookSummary> {
+  async open(
+    source: Blob | ArrayBuffer,
+    resume?: string | ResumeTarget,
+  ): Promise<BookSummary> {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
-    this.resumeCfi = resumeCfi;
+    const resumeTarget = normalizeResume(resume);
+    this.resumeCfi = resumeTarget.cfi;
 
     try {
       await this.teardownBook();
@@ -256,7 +274,10 @@ class ReaderSessionImpl implements ReaderSession {
         throw staleError();
       }
 
-      const buffer = await source.arrayBuffer();
+      const buffer =
+        source instanceof ArrayBuffer
+          ? source
+          : await source.arrayBuffer();
       if (!this.isCurrent(gen)) {
         throw staleError();
       }
@@ -285,36 +306,7 @@ class ReaderSessionImpl implements ReaderSession {
       this.wireRendition(this.rendition);
       this.applyAppearance(this.appearance);
 
-      const target = resumeCfi;
-      // epubjs on narrow viewports is more reliable if the first paint opens the
-      // default spine item, then a second display() applies the saved CFI.
-      if (target && target.includes("epubcfi")) {
-        await this.displayInternal(undefined, gen);
-        if (!this.isCurrent(gen)) {
-          throw staleError();
-        }
-        await waitMs(50);
-        await this.displayInternal(target, gen);
-        if (!this.isCurrent(gen)) {
-          throw staleError();
-        }
-        // Retry a few times if relocate settles at chapter start.
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          if (!this.isCurrent(gen)) {
-            throw staleError();
-          }
-          if (this.location?.cfi === target) {
-            break;
-          }
-          await waitMs(60 * (attempt + 1));
-          await this.displayInternal(target, gen);
-        }
-      } else {
-        await this.displayInternal(target, gen);
-        if (!this.isCurrent(gen)) {
-          throw staleError();
-        }
-      }
+      await this.openWithResumeFallback(resumeTarget, gen);
 
       const summary = readBookSummary(book);
       this.emit({ type: "status", status: "idle" });
@@ -363,29 +355,97 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   async goPrevious(): Promise<void> {
+    await this.navigateAdjacent("prev");
+  }
+
+  async goNext(): Promise<void> {
+    await this.navigateAdjacent("next");
+  }
+
+  private async navigateAdjacent(direction: "next" | "prev"): Promise<void> {
     this.assertAlive();
     const gen = this.beginOp();
     this.emit({ type: "status", status: "loading" });
-    const prevDoc = this.lastBoundDocument;
-    const prevHref = this.location?.spineHref;
-    const prevIndex = this.location?.spineIndex;
+    const before = this.snapshotTransition();
     try {
-      // Teardown only after navigation succeeds so a failed prev() keeps
-      // current-chapter gates/links/conversion alive.
       const rendition = this.requireRendition();
-      await rendition.prev();
+      if (direction === "next") {
+        await rendition.next();
+      } else {
+        await rendition.prev();
+      }
       if (!this.isCurrent(gen)) return;
-      const nextLoc = await this.readLocationFromRendition();
+
+      // Prefer relocated/reportLocation result after next/prev promise settles.
+      const nextLoc =
+        (await this.awaitMeaningfulLocation(gen, before.location, 600)) ??
+        (await this.readLocationFromRendition());
       if (!this.isCurrent(gen)) return;
       if (nextLoc) {
         this.location = nextLoc;
         this.emit({ type: "location", location: nextLoc });
       }
-      const rejectDoc = this.didCrossSpine(prevHref, prevIndex)
-        ? prevDoc
-        : null;
-      this.teardownChapter();
-      await this.afterChapterSettled(gen, { rejectDocument: rejectDoc });
+
+      const afterDoc =
+        readContentsDocument(this.rendition) ||
+        readIframeDocument(this.element);
+      const after: TransitionSnapshot = {
+        location: nextLoc ?? this.location,
+        document: afterDoc,
+        renderEpoch: this.renderEpoch,
+        cfi: nextLoc?.cfi ?? this.location?.cfi,
+        spineIndex: nextLoc?.spineIndex ?? this.location?.spineIndex,
+        spineHref: nextLoc?.spineHref ?? this.location?.spineHref,
+      };
+      const kind = classifyTransition(before, after);
+
+      if (kind === "same-spine-same-document") {
+        // Keep converter baseline, revealed images, and chapter URLs.
+        if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
+          this.lastBoundDocument = afterDoc;
+          this.bindLiveChapterDocument(afterDoc);
+          if (!this.converter.hasCaptureFor(afterDoc)) {
+            this.converter.capture(afterDoc);
+          }
+          try {
+            this.conversionGeneration += 1;
+            await this.converter.apply(
+              this.conversion,
+              this.conversionGeneration,
+            );
+          } catch {
+            // best-effort
+          }
+          this.repositionParentOverlays();
+        }
+      } else if (kind === "same-spine-replaced-document") {
+        // New live DOM for same chapter — rebind; recapture only if needed.
+        this.clearChapterGestures();
+        this.clearParentImageGates();
+        this.clearExternalLinkBridge();
+        if (this.transformResult) {
+          try {
+            this.transformResult.dispose();
+          } catch {
+            // ignore
+          }
+          this.transformResult = null;
+        }
+        if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
+          await this.settleChapterDocument(afterDoc, gen, {
+            forceCapture: !this.converter.hasCaptureFor(afterDoc),
+          });
+        }
+      } else if (kind === "cross-spine") {
+        this.teardownChapter();
+        await this.afterChapterSettled(gen, {
+          rejectDocument: before.document,
+        });
+      } else {
+        // no-transition (boundary or stale): keep chapter usable
+        await this.rebindCurrentChapter();
+      }
+
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
@@ -402,42 +462,128 @@ class ReaderSessionImpl implements ReaderSession {
     }
   }
 
-  async goNext(): Promise<void> {
-    this.assertAlive();
-    const gen = this.beginOp();
-    this.emit({ type: "status", status: "loading" });
-    const prevDoc = this.lastBoundDocument;
-    const prevHref = this.location?.spineHref;
-    const prevIndex = this.location?.spineIndex;
-    try {
-      const rendition = this.requireRendition();
-      await rendition.next();
-      if (!this.isCurrent(gen)) return;
-      const nextLoc = await this.readLocationFromRendition();
-      if (!this.isCurrent(gen)) return;
-      if (nextLoc) {
-        this.location = nextLoc;
-        this.emit({ type: "location", location: nextLoc });
+  private snapshotTransition(): TransitionSnapshot {
+    const doc =
+      this.lastBoundDocument ||
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    return {
+      location: this.location,
+      document: doc,
+      renderEpoch: this.renderEpoch,
+      cfi: this.location?.cfi,
+      spineIndex: this.location?.spineIndex,
+      spineHref: this.location?.spineHref,
+    };
+  }
+
+  /**
+   * Wait for a relocated event that changes CFI/page/spine, or time out.
+   * Does not treat a stale non-null rendition.location as success.
+   */
+  private awaitMeaningfulLocation(
+    gen: number,
+    prev: ReaderLocation | null | { cfi: string; spineHref: string; spineIndex: number; chapterPage: number } | null,
+    timeoutMs: number,
+  ): Promise<ReaderLocation | null> {
+    const rendition = this.rendition;
+    if (!rendition) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (loc: ReaderLocation | null) => {
+        if (settled) return;
+        settled = true;
+        try {
+          rendition.off?.("relocated", onRelocated);
+        } catch {
+          // ignore
+        }
+        resolve(loc);
+      };
+
+      const onRelocated = (raw: unknown) => {
+        if (!this.isCurrent(gen) || this.rendition !== rendition) {
+          finish(null);
+          return;
+        }
+        const mapped = mapLocation(raw as AdaptedLocation, this.spineCount);
+        if (!mapped) return;
+        if (!locationMeaningfullyChanged(prev, mapped)) {
+          // Stale non-null location from an earlier page — ignore.
+          return;
+        }
+        finish(mapped);
+      };
+
+      try {
+        rendition.on("relocated", onRelocated);
+      } catch {
+        finish(null);
+        return;
       }
-      const rejectDoc = this.didCrossSpine(prevHref, prevIndex)
-        ? prevDoc
-        : null;
-      this.teardownChapter();
-      await this.afterChapterSettled(gen, { rejectDocument: rejectDoc });
-      if (!this.isCurrent(gen)) return;
-      this.emit({ type: "status", status: "idle" });
-    } catch (error) {
-      if (!this.isCurrent(gen)) return;
-      await this.rebindCurrentChapter();
-      this.emit({
-        type: "status",
-        status: "error",
-        message: errorMessage(error),
+
+      // next()/prev() often already ran reportLocation before this await.
+      void this.readLocationFromRendition().then((mapped) => {
+        if (settled) return;
+        if (!this.isCurrent(gen)) {
+          finish(null);
+          return;
+        }
+        if (mapped && locationMeaningfullyChanged(prev, mapped)) {
+          finish(mapped);
+        }
       });
-      throw error;
-    } finally {
-      this.endOp();
+
+      setTimeout(() => {
+        if (settled) return;
+        // Bounded fallback: accept current mapped location even if unchanged
+        // (start/end of book).
+        void this.readLocationFromRendition().then((mapped) => {
+          finish(this.isCurrent(gen) ? mapped : null);
+        });
+      }, timeoutMs);
+    });
+  }
+
+  private async openWithResumeFallback(
+    resume: ResumeTarget,
+    gen: number,
+  ): Promise<void> {
+    const cfi = resume.cfi?.includes("epubcfi") ? resume.cfi : undefined;
+    const href = resume.spineHref?.trim() || undefined;
+
+    if (cfi) {
+      try {
+        await this.displayInternal(undefined, gen);
+        if (!this.isCurrent(gen)) throw staleError();
+        await waitMs(50);
+        await this.displayInternal(cfi, gen);
+        if (!this.isCurrent(gen)) throw staleError();
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          if (!this.isCurrent(gen)) throw staleError();
+          if (this.location?.cfi === cfi) return;
+          await waitMs(60 * (attempt + 1));
+          await this.displayInternal(cfi, gen);
+        }
+        if (this.location?.cfi === cfi) return;
+      } catch {
+        // Fall through to spine href / first item — never leave book unopenable.
+      }
     }
+
+    if (href) {
+      try {
+        await this.displayInternal(href, gen);
+        if (!this.isCurrent(gen)) throw staleError();
+        return;
+      } catch {
+        // Fall through to first spine item.
+      }
+    }
+
+    await this.displayInternal(undefined, gen);
+    if (!this.isCurrent(gen)) throw staleError();
   }
 
   resize(): void {
@@ -591,9 +737,8 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   /**
-   * Soft geometry rebind after layout: never bumps navigation generation,
-   * never calls rendition.display(cfi) (that rewound pages and could tear down
-   * gates when EPUB.js reused the same Document).
+   * Soft geometry rebind after layout. Primary path is rendered/relocated after
+   * epubjs onResized; timer is only a bounded fallback (not the sole mechanism).
    */
   private scheduleResizeRebind(): void {
     if (this.resizeTimer !== null) {
@@ -601,10 +746,12 @@ class ReaderSessionImpl implements ReaderSession {
     }
     this.resizeToken += 1;
     const token = this.resizeToken;
+    // Arm late repair for engines that emit rendered well after resize.
+    this.pendingLateChapterRebindGen = this.generation;
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = null;
       void this.runResizeRebind(token);
-    }, 80);
+    }, 120);
   }
 
   private cancelResizeRebind(): void {
@@ -623,9 +770,25 @@ class ReaderSessionImpl implements ReaderSession {
     if (this.inflightOps > 0) return;
 
     try {
-      // Re-attach gates/gestures/links on the live document. Same Document
-      // identity after resize is normal and must still rebind.
-      await this.rebindCurrentChapter();
+      const beforeDoc = this.lastBoundDocument;
+      const afterDoc =
+        readContentsDocument(this.rendition) ||
+        readIframeDocument(this.element);
+
+      if (
+        afterDoc &&
+        beforeDoc &&
+        afterDoc !== beforeDoc &&
+        isChapterDocumentReady(afterDoc, this.rendition)
+      ) {
+        // New live DOM after epubjs view clear/redisplay.
+        await this.settleChapterDocument(afterDoc, this.generation, {
+          forceCapture: !this.converter.hasCaptureFor(afterDoc),
+        });
+      } else {
+        // Same Document: preserve converter baseline; rebind chrome only.
+        await this.rebindCurrentChapter();
+      }
       if (this.destroyed || token !== this.resizeToken || this.inflightOps > 0) {
         return;
       }
@@ -633,25 +796,6 @@ class ReaderSessionImpl implements ReaderSession {
     } catch {
       // best-effort geometry repair
     }
-  }
-
-  /**
-   * True when location (already synced after next/prev) differs from the
-   * pre-navigation spine snapshot. In-chapter page turns keep the same spine.
-   */
-  private didCrossSpine(
-    prevHref: string | undefined,
-    prevIndex: number | undefined,
-  ): boolean {
-    const href = this.location?.spineHref;
-    const index = this.location?.spineIndex;
-    if (prevIndex !== undefined && index !== undefined && index !== prevIndex) {
-      return true;
-    }
-    if (prevHref && href && prevHref !== href) {
-      return true;
-    }
-    return false;
   }
 
   private async afterChapterSettled(
@@ -1025,10 +1169,24 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   private ensureParentOverlayTimer(): void {
+    // Low-frequency fallback only — primary path is event/rAF driven.
     if (this.parentOverlayRepositionTimer !== null) return;
+    if (
+      this.parentGatePairs.length === 0 &&
+      this.parentExternalLinks.length === 0
+    ) {
+      return;
+    }
     this.parentOverlayRepositionTimer = setInterval(() => {
+      if (
+        this.parentGatePairs.length === 0 &&
+        this.parentExternalLinks.length === 0
+      ) {
+        this.clearParentOverlaysTimer();
+        return;
+      }
       this.repositionParentOverlays();
-    }, 400);
+    }, 1000);
   }
 
   private clearParentImageGates(): void {
@@ -1813,6 +1971,22 @@ function resolveTheme(
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return String(error);
+}
+
+function normalizeResume(
+  resume: string | ResumeTarget | undefined,
+): ResumeTarget {
+  if (resume == null) return {};
+  if (typeof resume === "string") {
+    return { cfi: resume };
+  }
+  return {
+    ...(resume.cfi ? { cfi: resume.cfi } : {}),
+    ...(resume.spineHref ? { spineHref: resume.spineHref } : {}),
+    ...(typeof resume.approximatePercent === "number"
+      ? { approximatePercent: resume.approximatePercent }
+      : {}),
+  };
 }
 
 function staleError(): Error {

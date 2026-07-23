@@ -1,11 +1,11 @@
 # Release 0.1 — current blockers (authoritative)
 
-**Commit baseline for this table:** update when re-running gates.  
-**History / narrative of earlier reviews:** [`code-review-2026-07-21.md`](code-review-2026-07-21.md) (archive only; do not treat old “Fixed” rows as current).
+**Commit baseline for this table:** update after each full gate run (see Gates below).  
+**History:** older narratives stay in archives; do not treat old “Fixed” rows as current without re-running commands.
 
 ## Verdict
 
-Automated matrix on this worktree is the only green claim. **Physical iPhone Safari and live `books.pkwor.com` are not claimed.** Deploy only after those and a fresh independent re-review.
+Automated matrix on this worktree is the only green claim. **Physical iPhone Safari and live `books.pkwor.com` are not claimed.** Deploy only after those and a fresh independent re-review of the latest commit.
 
 ## Current residual risk (honest)
 
@@ -13,40 +13,43 @@ Automated matrix on this worktree is the only green claim. **Physical iPhone Saf
 | --- | --- | --- |
 | R1 | JSZip inflate worker may still allocate before consumer stream aborts | Accepted mitigation (consumer mid-stream abort + declared ceilings) |
 | R2 | `createUrl` work cannot be cancelled inside epubjs; we dispose late blobs | Mitigated |
-| R3 | Sanitizer is denylist + CSP, not full allowlist | **Accepted for 0.1** (allowlist deferred) |
-| R4 | epubjs 0.3.93 + `@xmldom/xmldom@0.9.10` override | **Accepted for 0.1** (audit 0); engine major is 0.2+ work |
+| R3 | Sanitizer is denylist + CSP, not full allowlist | **Accepted for 0.1** |
+| R4 | epubjs 0.3.93 + `@xmldom/xmldom@0.9.10` override | **Accepted for 0.1** (audit 0) |
 | R5 | Physical device / live domain | Open (deploy prerequisite) |
-| R6 | Exact mid-chapter CFI on **mobile** long single-spine | **Accepted limit for 0.1**; E2E: exact CFI multi-chapter; spine+percent mobile long-spine. **Option C (epubjs 0.4) tried and rejected** — see below |
+| R6 | Exact mid-chapter CFI on **mobile** long single-spine | **Accepted limit for 0.1** |
+| R7 | Active-chapter package CSS still not fully injected as sanitized `<style>` | Open (hardening backlog §E) |
+| R8 | Full ZIP EOCD pre-parse / ZIP64 reject not complete | Open (hardening backlog §H) |
+| R9 | Share-target uses same memory policy only partially (profile staging) | Open (hardening backlog §G9) |
+| R10 | Settings save not fully generation-queued (latest-wins partial) | Open (hardening backlog §J) |
 
-### R6 option C (epubjs 0.4) — tried, not merged
+## Hardening pass (feature/release-0.1)
 
-Branch `experiment/epubjs-0.4` / note `docs/experiments/epubjs-0.4-r6.md` (on that branch):
+Implemented in recent commits (see git log):
 
-- **0.4.2 is not a drop-in:** `ePub()` is async; Book/Rendition/spine hooks model changed; would require rewriting reader-session + adapter + guards.
-- **Package resolution broken** for modern ESM (`lib/index.js` extensionless imports fail).
-- **Audit regression:** depends on deprecated `xmldom@0.1.x` (critical/moderate); our 0.3.93 + override stays at **0 vulns**.
-- **No evidence** mid-chapter mobile CFI improves (could not complete a clean open/render smoke without a full rewrite).
+| Area | Status |
+| --- | --- |
+| Operation settlement / same-spine next without full teardown | **In** |
+| Resize without `display(cfi)` race; token cancel on beginOp | **In** |
+| Converter original baseline preserved on rebind | **In** |
+| ResumeTarget CFI → spineHref → first spine fallback | **In** |
+| Platform import policy (Apple 25 warn / 50 block) | **In** |
+| encryption.xml font obfuscation allow | **In** |
+| IDB late-open close + onversionchange | **In** |
+| SW update waits for controllerchange (+ timeout) | **In** |
+| Overlay poll only when overlays exist (1s fallback) | **Partial** |
+| GH Actions `release-0.1` workflow | **In** |
+| Section-aware CSS injection / full ZIP EOCD | **Not complete** |
 
-**Decision:** stay on **0.3.93**. Future R6 work = Locations % resume (option A), not a blind 0.4 bump.
-
-## Closed in latest pass (must have tests)
-
-| ID | Finding | Evidence |
-| --- | --- | --- |
-| C1 | Exact multi-book CFI resume across reload | E2E captures CFI before close; asserts equality after reopen |
-| C2 | Late/unowned blob + oversize cache | Unit: late revoke; fail-closed size-check; oversize purge |
-| C3 | External links parent open | E2E stubs `window.open`; requires noopener + example.com |
-| C4 | Image reveal decode | E2E requires `naturalWidth > 0` on blob/data src |
-| C5 | Durable library after hard reload + re-nav | E2E multi-book stress |
-| C6 | Docs single source of truth | This file + rewritten `implementation-notes.html` |
-| C7 | Duplicate image extraction on rapid taps | Unit clicks one gate twice and requires one EPUB `createUrl` call; chapter-scoped promise map rejects stale results |
-
-## Gates (measured after residual-list pass)
+## Gates (fresh — re-measure on each ship)
 
 | Gate | Result |
 | --- | --- |
-| `npm run check` | pass |
-| `npm run test:run` | **120** tests |
-| `npm run build` / `check:bundle` | pass; shell **61,217** gzip |
-| `npm audit` | **0** (xmldom override) |
-| `npm run test:e2e` | **40/40** (3.9 min; all 4 projects) |
+| `npm run check` | pass (after latest edits) |
+| `npm run test:run` | **176** tests |
+| `npm run build` / `check:bundle` | pass; shell **~69,754** gzip |
+| `npm audit --audit-level=high` | **0 vulnerabilities** |
+| `npm run test:e2e` | **44/44** (chromium, webkit, Mobile Chrome, Mobile Safari) |
+
+## Physical-device validation
+
+**Not performed in this environment.** Do not claim iPhone/iPad import limits without device logs.

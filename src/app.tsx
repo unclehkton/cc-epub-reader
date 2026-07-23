@@ -173,13 +173,44 @@ function useDeferredServiceWorkerUpdate(): {
   }, []);
 
   const applyUpdate = useCallback(() => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
+      return;
+    }
+
+    let reloaded = false;
+    const reloadOnce = () => {
+      if (reloaded) return;
+      reloaded = true;
+      window.location.reload();
+    };
+
+    const onControllerChange = () => {
+      navigator.serviceWorker.removeEventListener(
+        "controllerchange",
+        onControllerChange,
+      );
+      reloadOnce();
+    };
+
+    navigator.serviceWorker.addEventListener(
+      "controllerchange",
+      onControllerChange,
+    );
+
     if (waitingWorker) {
       waitingWorker.postMessage({ type: "SKIP_WAITING" });
     }
+
     setNeedRefresh(false);
-    if (typeof window !== "undefined") {
-      window.location.reload();
-    }
+
+    // Bounded fallback if controllerchange never fires.
+    window.setTimeout(() => {
+      navigator.serviceWorker.removeEventListener(
+        "controllerchange",
+        onControllerChange,
+      );
+      reloadOnce();
+    }, 2500);
   }, [waitingWorker]);
 
   return { needRefresh, applyUpdate };

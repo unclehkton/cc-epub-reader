@@ -35,6 +35,11 @@ export function openDatabase(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
+    request.onblocked = () => {
+      // Another tab holds an older version open; surface as failure so callers retry.
+      reject(new Error("IndexedDB open blocked"));
+    };
+
     request.onupgradeneeded = (event) => {
       const db = request.result;
       const oldVersion = event.oldVersion;
@@ -102,8 +107,47 @@ export function openDatabase(): Promise<IDBDatabase> {
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      // Close when another connection wants to upgrade (prevents sticky locks).
+      db.onversionchange = () => {
+        try {
+          db.close();
+        } catch {
+          // ignore
+        }
+      };
+      resolve(db);
+    };
     request.onerror = () =>
       reject(request.error ?? new Error("Failed to open IndexedDB"));
   });
+}
+
+/**
+ * Open IndexedDB with a timeout. Late successful opens are closed so they
+ * cannot leak connections after the caller has already failed.
+ */
+export function openDatabaseWithTimeout(ms: number): Promise<IDBDatabase> {
+  let timedOut = false;
+  const open = openDatabase().then((db) => {
+    if (timedOut) {
+      try {
+        db.close();
+      } catch {
+        // ignore
+      }
+      throw new Error("IndexedDB open completed after timeout");
+    }
+    return db;
+  });
+
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      timedOut = true;
+      reject(new Error("IndexedDB open timed out"));
+    }, ms);
+  });
+
+  return Promise.race([open, timeout]);
 }

@@ -17,6 +17,11 @@ import { BookRow } from "./book-row";
 import { DeleteDialog } from "./delete-dialog";
 import { isImportError } from "./import-errors";
 import { StorageNotice } from "./storage-notice";
+import {
+  assessImport,
+  collectBrowserImportSignals,
+  formatFileSizeMiB,
+} from "../platform/import-policy";
 import { validateEpub } from "./epub-validator";
 
 export interface BookSelection {
@@ -139,7 +144,33 @@ export function LibraryScreen({
     setImporting(true);
     setErrorMessage(null);
     try {
-      const validated = await validateEpub(file, file.name);
+      // Memory policy before any full-file read / JSZip.
+      const assessment = assessImport(
+        file.size,
+        collectBrowserImportSignals(),
+      );
+      if (assessment.decision === "block") {
+        const size = formatFileSizeMiB(file.size);
+        setErrorMessage(
+          `此 EPUB 檔案為 ${size}，超過此裝置的匯入上限（${formatFileSizeMiB(assessment.blockingThresholdBytes)}）。為避免瀏覽器因記憶體不足而關閉，無法匯入此檔案。`,
+        );
+        setImporting(false);
+        return;
+      }
+      if (assessment.decision === "warn") {
+        const size = formatFileSizeMiB(file.size);
+        const ok = window.confirm(
+          `此 EPUB 檔案較大（${size}）。\n\n在手機或平板上匯入大型 EPUB 可能使用大量記憶體，導致瀏覽器或閱讀器被系統關閉。建議先關閉其他分頁及應用程式。\n\n按「確定」仍然匯入，按「取消」中止。`,
+        );
+        if (!ok) {
+          setImporting(false);
+          return;
+        }
+      }
+
+      const validated = await validateEpub(file, file.name, {
+        maxBytes: assessment.blockingThresholdBytes,
+      });
       await repository.importBook(validated);
       if (!hasRequestedPersist) {
         setHasRequestedPersist(true);
