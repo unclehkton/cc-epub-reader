@@ -14,6 +14,7 @@ export type UiStringKey =
   | "settings"
   | "toc"
   | "close"
+  | "closeSettings"
   | "fullscreen"
   | "exitFullscreen"
   | "prevPage"
@@ -47,6 +48,7 @@ const HANT: Record<UiStringKey, string> = {
   settings: "設定",
   toc: "目錄",
   close: "關閉",
+  closeSettings: "關閉設定",
   fullscreen: "全螢幕",
   exitFullscreen: "結束全螢幕",
   prevPage: "上一頁",
@@ -83,6 +85,7 @@ const HANS: Record<UiStringKey, string> = {
   settings: "设置",
   toc: "目录",
   close: "关闭",
+  closeSettings: "关闭设置",
   fullscreen: "全屏",
   exitFullscreen: "结束全屏",
   prevPage: "上一页",

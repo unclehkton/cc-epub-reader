@@ -102,7 +102,7 @@ export function SettingsSheet({
       <button
         type="button"
         class="settings-backdrop"
-        aria-label={t(lang, "close")}
+        aria-label={t(lang, "closeSettings")}
         onClick={onClose}
       />
       <div
@@ -119,7 +119,7 @@ export function SettingsSheet({
             type="button"
             class="settings-close touch-target"
             style={{ minWidth: "44px", minHeight: "44px" }}
-            aria-label={t(lang, "close")}
+            aria-label={t(lang, "closeSettings")}
             onClick={onClose}
           >
             {t(lang, "close")}

@@ -842,7 +842,8 @@ class ReaderSessionImpl implements ReaderSession {
       );
       button.textContent = anchor.textContent?.trim() || "外部連結";
       button.style.position = "fixed";
-      button.style.zIndex = "19";
+      // Above parent image gates (z-index 20) so a mis-parked gate cannot steal taps.
+      button.style.zIndex = "21";
       button.style.minWidth = "44px";
       button.style.minHeight = "44px";
       button.style.pointerEvents = "auto";
