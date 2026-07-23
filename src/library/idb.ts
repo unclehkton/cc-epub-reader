@@ -33,10 +33,14 @@ export function transactionDone(tx: IDBTransaction): Promise<void> {
 
 export function openDatabase(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
+    let settled = false;
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onblocked = () => {
       // Another tab holds an older version open; surface as failure so callers retry.
+      // If the open later succeeds, onsuccess closes the orphaned connection.
+      if (settled) return;
+      settled = true;
       reject(new Error("IndexedDB open blocked"));
     };
 
@@ -117,20 +121,41 @@ export function openDatabase(): Promise<IDBDatabase> {
           // ignore
         }
       };
+      if (settled) {
+        // Late success after onblocked/onerror reject — close orphan.
+        try {
+          db.close();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      settled = true;
       resolve(db);
     };
-    request.onerror = () =>
+    request.onerror = () => {
+      if (settled) return;
+      settled = true;
       reject(request.error ?? new Error("Failed to open IndexedDB"));
+    };
   });
 }
 
 /**
  * Open IndexedDB with a timeout. Late successful opens are closed so they
  * cannot leak connections after the caller has already failed.
+ * Clears the timer on success so a resolved open does not leave a dangling
+ * timeout that could flip `timedOut` after the fact.
  */
 export function openDatabaseWithTimeout(ms: number): Promise<IDBDatabase> {
   let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
   const open = openDatabase().then((db) => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
     if (timedOut) {
       try {
         db.close();
@@ -143,8 +168,9 @@ export function openDatabaseWithTimeout(ms: number): Promise<IDBDatabase> {
   });
 
   const timeout = new Promise<never>((_, reject) => {
-    setTimeout(() => {
+    timer = setTimeout(() => {
       timedOut = true;
+      timer = undefined;
       reject(new Error("IndexedDB open timed out"));
     }, ms);
   });

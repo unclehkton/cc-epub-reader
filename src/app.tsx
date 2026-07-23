@@ -13,8 +13,13 @@ import {
   type LibraryRepository,
 } from "./library/library-screen";
 import { isImportError } from "./library/import-errors";
-import { openDatabase } from "./library/idb";
+import { openDatabaseWithTimeout } from "./library/idb";
 import { validateEpub } from "./library/epub-validator";
+import {
+  assessImport,
+  collectBrowserImportSignals,
+  formatFileSizeMiB,
+} from "./platform/import-policy";
 import { ReaderScreen } from "./reader/reader-screen";
 import {
   LatestWinsSettingsRepository,
@@ -432,15 +437,8 @@ export function App() {
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
         if (cancelled) return;
         try {
-          const db = await Promise.race([
-            openDatabase(),
-            new Promise<never>((_, reject) => {
-              setTimeout(
-                () => reject(new Error("IndexedDB open timed out")),
-                OPEN_TIMEOUT_MS,
-              );
-            }),
-          ]);
+          // Use the timeout owner that closes late-success connections.
+          const db = await openDatabaseWithTimeout(OPEN_TIMEOUT_MS);
           db.close();
           // Prove list works on durable store before marking ready.
           await repository.listBooks();
@@ -515,6 +513,23 @@ export function App() {
           await deleteShareInboxEntry(shareId);
           if (!cancelled) {
             setShareError("分享的 EPUB 已過期，請重新分享或使用「匯入 EPUB」。");
+            clearShareImportQuery();
+          }
+          return;
+        }
+
+        // Re-apply platform assessment here — SW only has a conservative
+        // fallback, and must not be the sole policy gate (iPhone 50 MiB).
+        const assessment = assessImport(
+          entry.byteLength,
+          collectBrowserImportSignals(),
+        );
+        if (assessment.decision === "block") {
+          await deleteShareInboxEntry(shareId);
+          if (!cancelled) {
+            setShareError(
+              `分享的檔案過大（${formatFileSizeMiB(entry.byteLength)}），無法在此裝置匯入。`,
+            );
             clearShareImportQuery();
           }
           return;

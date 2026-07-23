@@ -84,6 +84,22 @@ describe("BookRepository", () => {
     expect(opened?.epub.size).toBeGreaterThan(0);
   });
 
+  it("getBook exposes durable ArrayBuffer so open can skip Blob round-trip", async () => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]).buffer;
+    const imported = await repository.importBook(
+      makeImport({
+        title: "Bytes Book",
+        fileName: "bytes.epub",
+        epub: new Blob([bytes], { type: "application/epub+zip" }),
+        epubBytes: bytes,
+      }),
+    );
+    const opened = await repository.getBook(imported.id);
+    expect(opened?.epubBytes).toBeInstanceOf(ArrayBuffer);
+    expect(opened?.epubBytes?.byteLength).toBe(bytes.byteLength);
+    expect(opened?.epub).toBeInstanceOf(Blob);
+  });
+
   it("keeps two imports as distinct library entries", async () => {
     const first = await repository.importBook(
       makeImport({ title: "First Book", fileName: "first.epub" }),

@@ -331,10 +331,15 @@ export class BookRepository {
         return undefined;
       }
       const payloadRecord = rawPayload as PersistedPayload | undefined;
-      const epub = epubBytesToBlob(payloadRecord?.epub);
+      const rawEpub = payloadRecord?.epub;
+      const epub = epubBytesToBlob(rawEpub);
       if (!epub) {
         return undefined;
       }
+      // Prefer the durable ArrayBuffer identity — ReaderSession.open can skip
+      // another full Blob.arrayBuffer() copy for large iPhone warning-range files.
+      const epubBytes =
+        rawEpub instanceof ArrayBuffer ? rawEpub : undefined;
 
       // Update lastOpenedAt on metadata only — never rewrite the EPUB payload.
       meta.lastOpenedAt = Date.now();
@@ -345,7 +350,9 @@ export class BookRepository {
       );
       await Promise.all([put, writeDone]);
 
-      return { ...meta, epub };
+      return epubBytes
+        ? { ...meta, epub, epubBytes }
+        : { ...meta, epub };
     });
   }
 

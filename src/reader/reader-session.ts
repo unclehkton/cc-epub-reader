@@ -185,6 +185,14 @@ class ReaderSessionImpl implements ReaderSession {
   private pendingLateChapterRebindGen: number | null = null;
   /** Last document that received live bindings (gates/links/gestures). */
   private lastBoundDocument: Document | null = null;
+  /**
+   * Single-flight CSS injection per Document. settleChapterDocument may bind
+   * twice (pre/post conversion); never launch two concurrent injects.
+   */
+  private cssInjectState: {
+    doc: Document;
+    promise: Promise<void>;
+  } | null = null;
   private chapterGestureDisposer: (() => void) | null = null;
   private destroyed = false;
   private location: ReaderLocation | null = null;
@@ -330,15 +338,14 @@ class ReaderSessionImpl implements ReaderSession {
     this.emit({ type: "status", status: "loading" });
     // Do not teardown before navigation succeeds — a bad TOC href must keep
     // current-chapter gates/links/conversion alive (same pattern as next/prev).
-    // Only reject a previously *bound* document — never the live contents
-    // probe, which may be the same Document identity after a successful display.
-    const staleDoc = this.lastBoundDocument;
+    // After success, classify same-spine vs cross-spine: same-Document CFI
+    // jumps must NOT teardown (EPUB.js may reuse the Document and skip rendered).
+    const before = this.snapshotTransition();
     try {
       const rendition = this.requireRendition();
       await rendition.display(target);
       if (!this.isCurrent(gen)) return;
-      this.teardownChapter();
-      await this.afterChapterSettled(gen, { rejectDocument: staleDoc });
+      await this.settleAfterNavigation(gen, before);
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
@@ -376,77 +383,7 @@ class ReaderSessionImpl implements ReaderSession {
         await rendition.prev();
       }
       if (!this.isCurrent(gen)) return;
-
-      // Prefer relocated/reportLocation result after next/prev promise settles.
-      const nextLoc =
-        (await this.awaitMeaningfulLocation(gen, before.location, 600)) ??
-        (await this.readLocationFromRendition());
-      if (!this.isCurrent(gen)) return;
-      if (nextLoc) {
-        this.location = nextLoc;
-        this.emit({ type: "location", location: nextLoc });
-      }
-
-      const afterDoc =
-        readContentsDocument(this.rendition) ||
-        readIframeDocument(this.element);
-      const after: TransitionSnapshot = {
-        location: nextLoc ?? this.location,
-        document: afterDoc,
-        renderEpoch: this.renderEpoch,
-        cfi: nextLoc?.cfi ?? this.location?.cfi,
-        spineIndex: nextLoc?.spineIndex ?? this.location?.spineIndex,
-        spineHref: nextLoc?.spineHref ?? this.location?.spineHref,
-      };
-      const kind = classifyTransition(before, after);
-
-      if (kind === "same-spine-same-document") {
-        // Keep converter baseline, revealed images, and chapter URLs.
-        if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
-          this.lastBoundDocument = afterDoc;
-          this.bindLiveChapterDocument(afterDoc);
-          if (!this.converter.hasCaptureFor(afterDoc)) {
-            this.converter.capture(afterDoc);
-          }
-          try {
-            this.conversionGeneration += 1;
-            await this.converter.apply(
-              this.conversion,
-              this.conversionGeneration,
-            );
-          } catch {
-            // best-effort
-          }
-          this.repositionParentOverlays();
-        }
-      } else if (kind === "same-spine-replaced-document") {
-        // New live DOM for same chapter — rebind; recapture only if needed.
-        this.clearChapterGestures();
-        this.clearParentImageGates();
-        this.clearExternalLinkBridge();
-        if (this.transformResult) {
-          try {
-            this.transformResult.dispose();
-          } catch {
-            // ignore
-          }
-          this.transformResult = null;
-        }
-        if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
-          await this.settleChapterDocument(afterDoc, gen, {
-            forceCapture: !this.converter.hasCaptureFor(afterDoc),
-          });
-        }
-      } else if (kind === "cross-spine") {
-        this.teardownChapter();
-        await this.afterChapterSettled(gen, {
-          rejectDocument: before.document,
-        });
-      } else {
-        // no-transition (boundary or stale): keep chapter usable
-        await this.rebindCurrentChapter();
-      }
-
+      await this.settleAfterNavigation(gen, before);
       if (!this.isCurrent(gen)) return;
       this.emit({ type: "status", status: "idle" });
     } catch (error) {
@@ -461,6 +398,102 @@ class ReaderSessionImpl implements ReaderSession {
     } finally {
       this.endOp();
     }
+  }
+
+  /**
+   * Shared post-navigation settlement for display / next / prev / resume hops.
+   * Only tear down chapter bindings when the spine (or Document identity) changes.
+   * Same-spine + same-Document CFI/page moves keep converter baseline, image
+   * gates, swipe, and external-link bridges intact.
+   */
+  private async settleAfterNavigation(
+    gen: number,
+    before: TransitionSnapshot,
+  ): Promise<void> {
+    if (!this.isCurrent(gen)) return;
+
+    // Prefer relocated/reportLocation after the navigation promise settles.
+    const nextLoc =
+      (await this.awaitMeaningfulLocation(gen, before.location, 600)) ??
+      (await this.readLocationFromRenditionGuarded(gen));
+    if (!this.isCurrent(gen)) return;
+    if (nextLoc) {
+      this.location = nextLoc;
+      this.emit({ type: "location", location: nextLoc });
+    }
+
+    const afterDoc =
+      readContentsDocument(this.rendition) ||
+      readIframeDocument(this.element);
+    const after: TransitionSnapshot = {
+      location: nextLoc ?? this.location,
+      document: afterDoc,
+      renderEpoch: this.renderEpoch,
+      cfi: nextLoc?.cfi ?? this.location?.cfi,
+      spineIndex: nextLoc?.spineIndex ?? this.location?.spineIndex,
+      spineHref: nextLoc?.spineHref ?? this.location?.spineHref,
+    };
+    const kind = classifyTransition(before, after);
+
+    if (kind === "same-spine-same-document") {
+      // Keep converter baseline, revealed images, and chapter URLs.
+      if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
+        this.lastBoundDocument = afterDoc;
+        this.bindLiveChapterDocument(afterDoc, { skipCssInject: false });
+        if (!this.converter.hasCaptureFor(afterDoc)) {
+          this.converter.capture(afterDoc);
+        }
+        try {
+          this.conversionGeneration += 1;
+          await this.converter.apply(
+            this.conversion,
+            this.conversionGeneration,
+          );
+        } catch {
+          // best-effort
+        }
+        this.repositionParentOverlays();
+      }
+      return;
+    }
+
+    if (kind === "same-spine-replaced-document") {
+      // New live DOM for same chapter — rebind; recapture only if needed.
+      this.clearChapterGestures();
+      this.clearParentImageGates();
+      this.clearExternalLinkBridge();
+      if (this.transformResult) {
+        try {
+          this.transformResult.dispose();
+        } catch {
+          // ignore
+        }
+        this.transformResult = null;
+      }
+      // New Document: allow a fresh CSS inject flight.
+      this.cssInjectState = null;
+      if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
+        await this.settleChapterDocument(afterDoc, gen, {
+          forceCapture: !this.converter.hasCaptureFor(afterDoc),
+        });
+      }
+      return;
+    }
+
+    if (kind === "cross-spine") {
+      this.teardownChapter();
+      // Reject the previous chapter Document only when we had a prior location.
+      // First open / resume with no prior location often already exposes the
+      // destination Document via getContents(); rejecting it would wait forever
+      // for a new identity that never arrives (and skip capture/bind).
+      await this.afterChapterSettled(gen, {
+        rejectDocument: before.location ? before.document : null,
+      });
+      return;
+    }
+
+    // no-transition (boundary or stale): keep chapter usable
+    await this.rebindCurrentChapter();
   }
 
   private snapshotTransition(): TransitionSnapshot {
@@ -719,22 +752,23 @@ class ReaderSessionImpl implements ReaderSession {
   // ---------------------------------------------------------------------------
 
   /**
-   * Open/setFlow path: may teardown first because there is no user-visible
-   * chapter that must survive a failed hop (or the caller already tore down).
+   * Open / setFlow / resume display path. Uses the same transition coordinator
+   * as public display() so same-spine CFI resume does not strip bindings when
+   * EPUB.js reuses the Document (and may not re-fire `rendered`).
+   *
+   * Callers that fully rebuild the book (open/setFlow) already tore down the
+   * chapter; when lastBoundDocument is null this classifies as cross-spine and
+   * force-captures the first ready document.
    */
   private async displayInternal(
     target: string | undefined,
     gen: number,
   ): Promise<void> {
-    // Reject only a previously bound chapter document. Using the live contents
-    // Document as staleDoc is wrong when EPUB.js reuses the same identity after
-    // display() — open/setFlow would never capture or bind.
-    const staleDoc = this.lastBoundDocument;
-    this.teardownChapter();
+    const before = this.snapshotTransition();
     const rendition = this.requireRendition();
     await rendition.display(target);
     if (!this.isCurrent(gen)) return;
-    await this.afterChapterSettled(gen, { rejectDocument: staleDoc });
+    await this.settleAfterNavigation(gen, before);
   }
 
   /**
@@ -852,6 +886,8 @@ class ReaderSessionImpl implements ReaderSession {
   ): Promise<void> {
     if (!this.isCurrent(gen)) return;
     this.lastBoundDocument = doc;
+    // First bind starts CSS inject; second bind after conversion skips a
+    // duplicate flight (same Document identity).
     this.bindLiveChapterDocument(doc);
 
     if (options.forceCapture || !this.converter.hasCaptureFor(doc)) {
@@ -871,7 +907,8 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (!this.isCurrent(gen)) return;
-    // Re-bind once more after conversion mutations settle (WebKit srcdoc).
+    // Re-bind gates/gestures after conversion mutations settle (WebKit srcdoc).
+    // CSS inject is single-flight for this Document — second call is a no-op.
     this.bindLiveChapterDocument(doc);
   }
 
@@ -927,7 +964,10 @@ class ReaderSessionImpl implements ReaderSession {
     await this.syncLocationFromRenditionAsync();
   }
 
-  private bindLiveChapterDocument(doc: Document): void {
+  private bindLiveChapterDocument(
+    doc: Document,
+    options?: { skipCssInject?: boolean },
+  ): void {
     // Listeners attached in spine.hooks.content are lost when EPUB.js
     // serializes the section into the iframe. Rebind gates on the live DOM.
     if (this.transformResult) {
@@ -952,11 +992,33 @@ class ReaderSessionImpl implements ReaderSession {
     // attach gestures on the live chapter document.
     this.installChapterGestures(doc);
     // Inject package CSS as sanitized <style> (archive-wide replacements off).
-    if (materialize) {
-      void injectPackageStylesheets(doc, materialize).then(() => {
-        this.repositionParentOverlays();
-      });
+    // Single-flight per Document — settle may call bind twice.
+    if (materialize && !options?.skipCssInject) {
+      this.scheduleCssInject(doc, materialize);
     }
+  }
+
+  /**
+   * One CSS injection promise per Document until teardown. Prevents double
+   * materialize storms when settleChapterDocument binds before and after OpenCC.
+   */
+  private scheduleCssInject(
+    doc: Document,
+    materialize: (packagePath: string) => Promise<string | null>,
+  ): void {
+    if (this.cssInjectState?.doc === doc) {
+      return;
+    }
+    const promise = injectPackageStylesheets(doc, materialize)
+      .then(() => {
+        if (this.cssInjectState?.doc === doc) {
+          this.repositionParentOverlays();
+        }
+      })
+      .catch(() => {
+        // best-effort
+      });
+    this.cssInjectState = { doc, promise };
   }
 
   private clearChapterGestures(): void {
@@ -1584,6 +1646,8 @@ class ReaderSessionImpl implements ReaderSession {
     this.clearChapterGestures();
     this.clearParentImageGates();
     this.clearExternalLinkBridge();
+    this.cssInjectState = null;
+    this.lastBoundDocument = null;
     if (this.transformResult) {
       try {
         this.transformResult.dispose();
@@ -1667,35 +1731,54 @@ class ReaderSessionImpl implements ReaderSession {
    * Resolve the current location, awaiting Promise-returning currentLocation().
    * Callers that branch on spine changes (next/prev) must use this, not the
    * fire-and-forget sync helper.
+   *
+   * Prefer `currentLocation()` / relocated when available; only fall back to
+   * the sync `rendition.location` field when async is unavailable. Pinned
+   * epubjs 0.3.x does not reliably return a Promise from currentLocation().
    */
   private async readLocationFromRendition(): Promise<ReaderLocation | null> {
     const rendition = this.rendition;
     if (!rendition) return null;
 
+    const current = rendition.currentLocation?.();
+    if (current && typeof (current as Promise<unknown>).then === "function") {
+      try {
+        const loc = await (current as Promise<AdaptedLocation | undefined>);
+        if (loc) {
+          return mapLocation(loc, this.spineCount);
+        }
+      } catch {
+        // fall through to sync location field
+      }
+    } else if (current) {
+      const mapped = mapLocation(current as AdaptedLocation, this.spineCount);
+      if (mapped) return mapped;
+    }
+
     const raw = rendition.location ?? null;
     if (raw) {
       return mapLocation(raw, this.spineCount);
     }
+    return null;
+  }
 
-    const current = rendition.currentLocation?.();
-    if (!current) return null;
-
-    if (typeof (current as Promise<unknown>).then === "function") {
-      try {
-        const loc = await (current as Promise<AdaptedLocation | undefined>);
-        if (!loc) return null;
-        return mapLocation(loc, this.spineCount);
-      } catch {
-        return null;
-      }
-    }
-
-    return mapLocation(current as AdaptedLocation, this.spineCount);
+  /** Like readLocationFromRendition, but drops results after gen/rendition change. */
+  private async readLocationFromRenditionGuarded(
+    gen: number,
+  ): Promise<ReaderLocation | null> {
+    const rendition = this.rendition;
+    const mapped = await this.readLocationFromRendition();
+    if (!mapped || this.destroyed) return null;
+    if (!this.isCurrent(gen) || this.rendition !== rendition) return null;
+    return mapped;
   }
 
   private async syncLocationFromRenditionAsync(): Promise<void> {
+    const rendition = this.rendition;
+    const gen = this.generation;
     const mapped = await this.readLocationFromRendition();
     if (!mapped || this.destroyed) return;
+    if (!this.isCurrent(gen) || this.rendition !== rendition) return;
     this.location = mapped;
     this.emit({ type: "location", location: mapped });
   }

@@ -1,8 +1,20 @@
 import type { ShareInboxEntry } from "../domain/types";
 import { openDatabase, requestToPromise, transactionDone } from "../library/idb";
+import {
+  ABSOLUTE_MAXIMUM_BYTES,
+  fallbackSharePolicy,
+} from "../platform/import-policy";
 
-/** Hard envelope limit for share-target EPUB candidates (100 MiB). */
-export const MAX_SHARE_EPUB_BYTES = 100 * 1024 * 1024;
+/**
+ * Absolute hard envelope (100 MiB). Share-target also applies
+ * fallbackSharePolicy blocking (50 MiB) so OS share cannot stage files that
+ * the platform picker would block on iPhone.
+ */
+export const MAX_SHARE_EPUB_BYTES = ABSOLUTE_MAXIMUM_BYTES;
+
+/** Share-target block threshold (conservative unknown-mobile / Apple-safe). */
+export const SHARE_TARGET_BLOCK_BYTES =
+  fallbackSharePolicy().blockingThresholdBytes;
 
 /** Abandoned share-inbox entries expire after 24 hours. */
 export const SHARE_INBOX_TTL_MS = 24 * 60 * 60 * 1000;
@@ -297,7 +309,11 @@ export async function handleShareTarget(request: Request): Promise<Response> {
     return localErrorResponse(415, "只接受 EPUB 檔案。");
   }
 
-  if (file.size > MAX_SHARE_EPUB_BYTES) {
+  // Platform-safe block (50 MiB) + absolute envelope (100 MiB).
+  if (
+    file.size >= SHARE_TARGET_BLOCK_BYTES ||
+    file.size > MAX_SHARE_EPUB_BYTES
+  ) {
     return localErrorResponse(413, "檔案太大，無法匯入。");
   }
 

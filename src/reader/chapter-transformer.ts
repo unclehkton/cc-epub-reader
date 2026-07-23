@@ -537,22 +537,27 @@ function stripRemoteStylesheets(
 /**
  * Materialize package stylesheets marked with data-epub-css and inject as
  * sanitized <style> into the live chapter document.
+ *
+ * Attempted-link budget is applied up front (`slice(0, MAX)`): missing or
+ * slow stylesheets still consume a slot so a hostile package cannot queue
+ * unbounded materialize/fetch timeouts past the cap.
  */
 export async function injectPackageStylesheets(
   doc: Document,
   materialize: MaterializeArchiveUrl,
 ): Promise<void> {
-  const links = Array.from(
+  const allLinks = Array.from(
     doc.querySelectorAll('link[data-epub-css], link[rel~="stylesheet"]'),
   );
+  // Cap attempts, not only successes — drop the tail without awaiting it.
+  const links = allLinks.slice(0, MAX_STYLESHEETS_PER_CHAPTER);
+  for (const extra of allLinks.slice(MAX_STYLESHEETS_PER_CHAPTER)) {
+    extra.remove();
+  }
+
   let aggregate = 0;
-  let count = 0;
 
   for (const link of links) {
-    if (count >= MAX_STYLESHEETS_PER_CHAPTER) {
-      link.remove();
-      continue;
-    }
     const path =
       link.getAttribute("data-epub-css") ||
       link.getAttribute("href") ||
@@ -594,7 +599,6 @@ export async function injectPackageStylesheets(
     if (media) style.setAttribute("media", media);
     style.textContent = sanitizePackageCss(text);
     link.replaceWith(style);
-    count += 1;
   }
 }
 

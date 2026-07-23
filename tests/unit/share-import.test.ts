@@ -165,6 +165,34 @@ describe("handleShareTarget", () => {
     fetchSpy.mockRestore();
   });
 
+  it("blocks share-target at 50 MiB policy (not only the 100 MiB envelope)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    // iPhone picker blocks at 50 MiB — share path must match (G9 / 0723-005).
+    const overPolicy = await handleShareTarget(
+      multipartRequest(
+        makeEpubFile("iphone-mid.epub", {
+          sizeHint: 50 * 1024 * 1024,
+        }),
+      ),
+    );
+    expect(overPolicy.status).toBe(413);
+    expect(await countShareInbox()).toBe(0);
+
+    // Just under 50 MiB is accepted by the SW gate (app re-assesses on promote).
+    const underPolicy = await handleShareTarget(
+      multipartRequest(
+        makeEpubFile("iphone-ok.epub", {
+          sizeHint: 50 * 1024 * 1024 - 1,
+        }),
+      ),
+    );
+    expect(underPolicy.status).toBe(303);
+    expect(await countShareInbox()).toBe(1);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
   it("stages a valid Blob and redirects locally to /?share-import=<id>", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const file = makeEpubFile("from-share.epub");

@@ -287,7 +287,8 @@ export function ReaderScreen({
       });
 
       try {
-        const bookSummary = await session.open(book.epub, {
+        // Prefer durable ArrayBuffer identity — avoids Blob→ArrayBuffer copy.
+        const bookSummary = await session.open(book.epubBytes ?? book.epub, {
           cfi: progress?.cfi,
           spineHref: progress?.spineHref,
           approximatePercent: progress?.approximatePercent,

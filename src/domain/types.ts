@@ -12,6 +12,11 @@ export interface BookMeta {
 /** Full book with payload, loaded only when opening a reader session. */
 export interface StoredBook extends BookMeta {
   epub: Blob;
+  /**
+   * Preferred single-read bytes from IndexedDB when available.
+   * Pass this to ReaderSession.open to avoid Blob→ArrayBuffer doubling.
+   */
+  epubBytes?: ArrayBuffer;
 }
 
 export interface StoredProgress {

@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  injectPackageStylesheets,
   type ArchiveResolver,
   transformChapter,
 } from "../../src/reader/chapter-transformer";
+import { MAX_STYLESHEETS_PER_CHAPTER } from "../../src/reader/css-sanitize";
 import { isRejectedUrl, resolveArchiveCandidate } from "../../src/reader/archive-url";
 
 function parseHtml(html: string): Document {
@@ -353,6 +355,26 @@ describe("transformChapter sanitizer", () => {
     expect("sanitizeAfterRender" in mod).toBe(false);
     expect("postRenderSanitize" in mod).toBe(false);
     expect("cleanupRenderedChapter" in mod).toBe(false);
+  });
+
+  it("limits stylesheet inject attempts (not only successes) to MAX", async () => {
+    const links = Array.from({ length: MAX_STYLESHEETS_PER_CHAPTER + 8 }, (_, i) => {
+      return `<link rel="stylesheet" data-epub-css="styles/s${i}.css">`;
+    }).join("");
+    const doc = parseHtml(`<!DOCTYPE html><html><head>${links}</head><body></body></html>`);
+
+    let materializeCalls = 0;
+    const materialize = vi.fn(async () => {
+      materializeCalls += 1;
+      // Simulate missing assets — previously these would not count toward the cap.
+      return null;
+    });
+
+    await injectPackageStylesheets(doc, materialize);
+
+    expect(materializeCalls).toBe(MAX_STYLESHEETS_PER_CHAPTER);
+    // Tail beyond the attempt budget is removed without awaiting.
+    expect(doc.querySelectorAll("link[data-epub-css]").length).toBe(0);
   });
 
   it("normalizes protocol-relative external links for parent open bridge", () => {

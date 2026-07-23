@@ -80,6 +80,11 @@ interface FakeControl {
    */
   asyncLocationAfterNext: boolean;
   asyncLocationDeferred: Deferred<AdaptedLocation | undefined> | null;
+  /**
+   * When true, next()/prev() advance pages within the current spine item until
+   * chapter page bounds, then cross spine — mirrors real paginated EPUB.js.
+   */
+  sameSpinePaging: boolean;
   emit(event: string, payload?: unknown): void;
   setLocation(partial: Partial<AdaptedLocation["start"]> & { cfi: string }): void;
 }
@@ -102,6 +107,25 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         const d = deferred<void>();
         control.displayCalls.push({ target, deferred: d });
         return d.promise.then(() => {
+          // Same-spine CFI jump: keep Document identity and spine, change CFI/page.
+          if (
+            typeof target === "string" &&
+            target.includes("epubcfi")
+          ) {
+            const cur = control.location?.start;
+            const page = (cur?.displayed?.page ?? 1) + 1;
+            const total = cur?.displayed?.total ?? 4;
+            control.setLocation({
+              cfi: target,
+              href: cur?.href ?? "ch1.xhtml",
+              index: cur?.index ?? 0,
+              displayed: { page: Math.min(page, total), total },
+            });
+            rendition.location = control.location;
+            control.emit("relocated", control.location);
+            // Intentionally no "rendered" — EPUB.js often reuses the Document.
+            return;
+          }
           // Populate location when a display resolves (if still attached).
           const href =
             typeof target === "string" && target
@@ -127,7 +151,48 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         const d = deferred<void>();
         control.nextCalls.push(d);
         return d.promise.then(() => {
-          const cur = control.location?.start.index ?? 0;
+          const curStart = control.location?.start;
+          const page = curStart?.displayed?.page ?? 1;
+          const total = curStart?.displayed?.total ?? 1;
+          // Same-spine page advance when multi-page chapter is active.
+          if (
+            control.sameSpinePaging &&
+            page < total &&
+            curStart
+          ) {
+            const nextPage = page + 1;
+            const href = curStart.href ?? "ch1.xhtml";
+            const index = curStart.index ?? 0;
+            const cfi = `epubcfi(/6/4[${href}]!/4/2/${nextPage * 2})`;
+            const nextLoc: AdaptedLocation = {
+              start: {
+                index,
+                href,
+                cfi,
+                displayed: { page: nextPage, total },
+              },
+              end: {
+                index,
+                href,
+                cfi,
+                displayed: { page: nextPage, total },
+              },
+            };
+            if (control.asyncLocationAfterNext) {
+              control.location = null;
+              rendition.location = null;
+              control.asyncLocationDeferred =
+                deferred<AdaptedLocation | undefined>();
+              control.asyncLocationDeferred.resolve(nextLoc);
+            } else {
+              control.location = nextLoc;
+              rendition.location = nextLoc;
+              control.emit("relocated", nextLoc);
+            }
+            return;
+          }
+
+          const cur = curStart?.index ?? 0;
           const nextIdx = Math.min(cur + 1, control.sections.length - 1);
           const section = control.sections[nextIdx]!;
           const href = section.href ?? `ch${nextIdx + 1}.xhtml`;
@@ -137,13 +202,13 @@ function createFakeFactory(control: FakeControl): EpubFactory {
               index: nextIdx,
               href,
               cfi,
-              displayed: { page: 1, total: 4 },
+              displayed: { page: 1, total: control.sameSpinePaging ? 4 : 4 },
             },
             end: {
               index: nextIdx,
               href,
               cfi,
-              displayed: { page: 1, total: 4 },
+              displayed: { page: 1, total: control.sameSpinePaging ? 4 : 4 },
             },
           };
           if (control.asyncLocationAfterNext) {
@@ -163,7 +228,25 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         const d = deferred<void>();
         control.prevCalls.push(d);
         return d.promise.then(() => {
-          const cur = control.location?.start.index ?? 0;
+          const curStart = control.location?.start;
+          const page = curStart?.displayed?.page ?? 1;
+          const total = curStart?.displayed?.total ?? 1;
+          if (control.sameSpinePaging && page > 1 && curStart) {
+            const prevPage = page - 1;
+            const href = curStart.href ?? "ch1.xhtml";
+            const index = curStart.index ?? 0;
+            const cfi = `epubcfi(/6/4[${href}]!/4/2/${prevPage * 2})`;
+            control.setLocation({
+              cfi,
+              href,
+              index,
+              displayed: { page: prevPage, total },
+            });
+            rendition.location = control.location;
+            control.emit("relocated", control.location);
+            return;
+          }
+          const cur = curStart?.index ?? 0;
           const prevIdx = Math.max(cur - 1, 0);
           const section = control.sections[prevIdx]!;
           control.setLocation({
@@ -298,6 +381,7 @@ function createControl(): FakeControl {
     contentsDocument: null,
     asyncLocationAfterNext: false,
     asyncLocationDeferred: null,
+    sameSpinePaging: false,
     emit(event, payload) {
       const set = control.listeners.get(event);
       if (!set) return;
@@ -879,6 +963,71 @@ describe("ReaderSession generation ownership", () => {
     expect(
       events.some((e) => e.type === "status" && e.status === "idle"),
     ).toBe(true);
+
+    session.destroy();
+  });
+
+  it("same-spine next keeps Document bindings and advances chapter page", async () => {
+    const control = createControl();
+    control.sameSpinePaging = true;
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><p>同章多頁文字</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+
+    // Ensure open settled on page 1 of a multi-page chapter.
+    expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
+    expect(session.getLocation()?.chapterPage).toBe(1);
+
+    events.length = 0;
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "same-spine next");
+    control.nextCalls[0]!.resolve();
+    await nextPromise;
+
+    const loc = session.getLocation();
+    expect(loc?.spineHref).toBe("ch1.xhtml");
+    expect(loc?.spineIndex).toBe(0);
+    expect(loc?.chapterPage).toBe(2);
+    // Same Document — content-tap must still fire (bindings not torn down).
+    events.length = 0;
+    chapterDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+
+    session.destroy();
+  });
+
+  it("same-Document CFI display does not teardown chapter bindings", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><p>保留轉換基準</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+
+    // Public path: content-tap proves bindings; also verify location CFI updates.
+    events.length = 0;
+    chapterDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+
+    const cfi = "epubcfi(/6/4[ch1.xhtml]!/4/2/4)";
+    control.displayCalls.length = 0;
+    const displayPromise = session.display(cfi);
+    await waitFor(() => control.displayCalls.length >= 1, "cfi display");
+    control.displayCalls[0]!.deferred.resolve();
+    await displayPromise;
+
+    expect(session.getLocation()?.cfi).toBe(cfi);
+    expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
+    // Bindings still live — same Document identity, no rendered event.
+    events.length = 0;
+    chapterDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
 
     session.destroy();
   });
