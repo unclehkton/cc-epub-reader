@@ -27,7 +27,7 @@ Automated matrix on this worktree is the only green claim. **Physical iPhone Saf
 | Area | Status |
 | --- | --- |
 | Destination Document ready **before** commit/revoke old chapter | **In** |
-| Settlement timeout: **rendition rollback** (CFI/href display) + live rebind | **In** |
+| Settlement timeout: **verified rollback** (live Doc + matching spine location) | **In** |
 | CSS via bounded archive stream (no createUrl; stream wall-clock timeout) | **In** |
 | Share inbox returns ArrayBuffer only (no Blob wrapper) | **In** |
 | encryption.xml DOMParser (comment decoy closed) | **In** |
@@ -40,8 +40,8 @@ Automated matrix on this worktree is the only green claim. **Physical iPhone Saf
 | Gate | Result |
 | --- | --- |
 | `tsc -b` / check | pass |
-| `vitest run` | **226** tests |
-| `vite build` / `check:bundle` | pass; shell **~74,655** gzip |
+| `vitest run` | **228** tests |
+| `vite build` / `check:bundle` | pass; shell **~74,694** gzip |
 | Playwright e2e | **44/44** (chromium, webkit, Mobile Chrome, Mobile Safari) |
 | Physical iPhone / live domain | **Not a merge requirement** (per latest decision) |
 

@@ -619,7 +619,12 @@ class ReaderSessionImpl implements ReaderSession {
    * After settlement timeout the iframe may show an empty shell while
    * `lastBoundDocument` still points at a detached previous Document.
    * Re-display the previous CFI/spine and bind the restored *live* Document.
-   * @returns true when a ready live document was restored
+   *
+   * Success requires BOTH a ready live Document AND a rendition location that
+   * matches the pre-navigation spine — never hard-write the old location when
+   * display actually landed on a different chapter (e.g. first spine).
+   *
+   * @returns true when a ready live document was restored at the old spine
    */
   private async rollbackAfterFailedSettlement(
     gen: number,
@@ -628,18 +633,28 @@ class ReaderSessionImpl implements ReaderSession {
     this.discardPendingTransform();
     if (!this.isCurrent(gen) || !this.rendition) return false;
 
+    // Nothing to restore to without a known prior location.
+    if (!before.location) return false;
+
+    const expectedHref =
+      before.location.spineHref || before.spineHref || undefined;
+    const expectedIndex =
+      before.location.spineIndex ?? before.spineIndex ?? undefined;
+
     const targets: Array<string | undefined> = [];
-    const cfi = before.location?.cfi ?? before.cfi;
-    const href =
-      before.location?.spineHref ?? before.spineHref ?? undefined;
+    const cfi = before.location.cfi ?? before.cfi;
     if (typeof cfi === "string" && cfi.includes("epubcfi")) {
       targets.push(cfi);
     }
-    if (typeof href === "string" && href.trim()) {
-      targets.push(href.trim());
+    if (typeof expectedHref === "string" && expectedHref.trim()) {
+      targets.push(expectedHref.trim());
     }
-    // Last resort: first spine item.
-    targets.push(undefined);
+    // display(undefined) opens the first spine — only valid when we were there.
+    if (expectedIndex === 0) {
+      targets.push(undefined);
+    }
+
+    if (targets.length === 0) return false;
 
     const rendition = this.rendition;
     for (const target of targets) {
@@ -651,37 +666,33 @@ class ReaderSessionImpl implements ReaderSession {
       }
       if (!this.isCurrent(gen) || this.rendition !== rendition) return false;
 
-      // Accept any ready live document after rollback (shell must be gone).
-      const live = await this.waitForDestinationDocument(gen, {
-        rejectDocument: null,
-        maxAttempts: 20,
-      });
-      if (!this.isCurrent(gen)) return false;
-      if (!live) continue;
-
-      // Restore pre-navigation location for progress / UI.
-      if (before.location) {
-        const restored: ReaderLocation = {
-          cfi: before.location.cfi,
-          spineHref: before.location.spineHref,
-          spineIndex: before.location.spineIndex,
-          spineCount:
-            typeof before.location.spineCount === "number"
-              ? before.location.spineCount
-              : this.spineCount,
-          chapterPage: before.location.chapterPage,
-          chapterPages:
-            typeof before.location.chapterPages === "number"
-              ? before.location.chapterPages
-              : Math.max(1, before.location.chapterPage),
-          approximatePercent:
-            typeof before.location.approximatePercent === "number"
-              ? before.location.approximatePercent
-              : 0,
-        };
-        this.location = restored;
-        this.emit({ type: "location", location: restored });
+      // Wait for a ready live document and a location that matches the old spine.
+      let live: Document | null = null;
+      let actual: ReaderLocation | null = null;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (!this.isCurrent(gen) || this.rendition !== rendition) return false;
+        const candidate =
+          readContentsDocument(this.rendition) ||
+          readIframeDocument(this.element);
+        const loc = await this.readLocationFromRenditionGuarded(gen);
+        if (
+          candidate &&
+          isChapterDocumentReady(candidate, this.rendition) &&
+          loc &&
+          this.locationMatchesRollbackTarget(loc, expectedHref, expectedIndex)
+        ) {
+          live = candidate;
+          actual = loc;
+          break;
+        }
+        await Promise.race([waitMs(40), this.waitForNextRender(50)]);
       }
+      if (!this.isCurrent(gen) || this.rendition !== rendition) return false;
+      if (!live || !actual) continue;
+
+      // Publish the *actual* rendition location (not a hard-written before copy).
+      this.location = actual;
+      this.emit({ type: "location", location: actual });
 
       // Detached previous Document must not be preferred over the live iframe.
       if (this.lastBoundDocument && this.lastBoundDocument !== live) {
@@ -694,6 +705,31 @@ class ReaderSessionImpl implements ReaderSession {
       return true;
     }
     return false;
+  }
+
+  /** True when actual location is on the pre-navigation spine. */
+  private locationMatchesRollbackTarget(
+    actual: ReaderLocation,
+    expectedHref: string | undefined,
+    expectedIndex: number | undefined,
+  ): boolean {
+    if (
+      expectedIndex !== undefined &&
+      actual.spineIndex !== expectedIndex
+    ) {
+      return false;
+    }
+    if (
+      expectedHref &&
+      actual.spineHref &&
+      expectedHref !== actual.spineHref
+    ) {
+      // Allow href suffix / basename match (EPUB path variants).
+      const a = expectedHref.replace(/^.*\//, "").toLowerCase();
+      const b = actual.spineHref.replace(/^.*\//, "").toLowerCase();
+      if (a !== b) return false;
+    }
+    return true;
   }
 
   private snapshotTransition(): TransitionSnapshot {

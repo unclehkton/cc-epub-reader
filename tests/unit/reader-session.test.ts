@@ -87,6 +87,11 @@ interface FakeControl {
    * chapter page bounds, then cross spine — mirrors real paginated EPUB.js.
    */
   sameSpinePaging: boolean;
+  /**
+   * When set, display() always leaves location on this href after resolve
+   * (simulates failed rollback that does not actually switch spine).
+   */
+  forceDisplayHref: string | null;
   emit(event: string, payload?: unknown): void;
   setLocation(partial: Partial<AdaptedLocation["start"]> & { cfi: string }): void;
   mintContentsForSpine(href: string): void;
@@ -110,18 +115,42 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         const d = deferred<void>();
         control.displayCalls.push({ target, deferred: d });
         return d.promise.then(() => {
+          // Test hook: pretend display resolved but spine never left force href.
+          if (control.forceDisplayHref) {
+            const href = control.forceDisplayHref;
+            const index = Math.max(
+              0,
+              control.sections.findIndex((s) => s.href === href),
+            );
+            control.setLocation({
+              cfi: `epubcfi(/6/4[${href}]!/4/2/2)`,
+              href,
+              index: index < 0 ? 0 : index,
+            });
+            rendition.location = control.location;
+            control.emit("relocated", control.location);
+            return;
+          }
           // Same-spine CFI jump: keep Document identity and spine, change CFI/page.
           if (
             typeof target === "string" &&
             target.includes("epubcfi")
           ) {
             const cur = control.location?.start;
+            // Prefer spine encoded in the CFI string when present.
+            const cfiHrefMatch = /\[([^\]]+\.x?html)\]/i.exec(target);
+            const hrefFromCfi = cfiHrefMatch?.[1];
+            const href = hrefFromCfi ?? cur?.href ?? "ch1.xhtml";
+            const index = Math.max(
+              0,
+              control.sections.findIndex((s) => s.href === href),
+            );
             const page = (cur?.displayed?.page ?? 1) + 1;
             const total = cur?.displayed?.total ?? 4;
             control.setLocation({
               cfi: target,
-              href: cur?.href ?? "ch1.xhtml",
-              index: cur?.index ?? 0,
+              href,
+              index: index < 0 ? (cur?.index ?? 0) : index,
               displayed: { page: Math.min(page, total), total },
             });
             rendition.location = control.location;
@@ -390,6 +419,7 @@ function createControl(): FakeControl {
     asyncLocationAfterNext: false,
     asyncLocationDeferred: null,
     sameSpinePaging: false,
+    forceDisplayHref: null,
     emit(event, payload) {
       const set = control.listeners.get(event);
       if (!set) return;
@@ -801,13 +831,18 @@ describe("ReaderSession generation ownership", () => {
     // Permanent empty shell — destination never becomes ready.
     control.contentsDocument = emptyShell;
 
-    // When settlement times out, rollback issues display(cfi/href). Resolve
-    // those and expose a restored ready Document on the live path.
+    // Rollback display(cfi/href) must land on ch1 location; only then expose
+    // a ready live Document for that spine.
     const pump = setInterval(() => {
-      if (control.displayCalls.length >= 2) {
-        control.contentsDocument = restoredDoc;
-      }
       for (const call of control.displayCalls) {
+        const t = call.target;
+        const targetsOldSpine =
+          t === undefined ||
+          t === "ch1.xhtml" ||
+          (typeof t === "string" && t.includes("ch1.xhtml"));
+        if (targetsOldSpine && control.displayCalls.indexOf(call) >= 1) {
+          control.contentsDocument = restoredDoc;
+        }
         call.deferred.resolve();
       }
     }, 20);
@@ -821,7 +856,9 @@ describe("ReaderSession generation ownership", () => {
     expect(control.contentsDocument).toBe(restoredDoc);
     expect(control.contentsDocument).not.toBe(oldDoc);
     expect(control.contentsDocument).not.toBe(emptyShell);
+    // Location comes from actual rendition after rollback display, not hard-write.
     expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
+    expect(session.getLocation()?.spineIndex).toBe(0);
 
     // Content tap must hit the restored *live* document (not detached oldDoc).
     events.length = 0;
@@ -829,6 +866,144 @@ describe("ReaderSession generation ownership", () => {
     expect(events.some((e) => e.type === "content-tap")).toBe(true);
     session.destroy();
   });
+
+  it(
+    "rollback fails when live Document stays on destination chapter",
+    async () => {
+      const control = createControl();
+      control.sections = [
+        { href: "ch1.xhtml", index: 0 },
+        { href: "ch2.xhtml", index: 1 },
+        { href: "ch3.xhtml", index: 2 },
+      ];
+      const ch2Doc = new DOMParser().parseFromString(
+        "<html><body><p data-ch='2'>第二章</p></body></html>",
+        "text/html",
+      );
+      const emptyShell = new DOMParser().parseFromString(
+        "<html><body></body></html>",
+        "text/html",
+      );
+      const destDoc = new DOMParser().parseFromString(
+        "<html><body><p data-ch='3'>第三章</p></body></html>",
+        "text/html",
+      );
+      // Open without pinned doc so cross-spine can change Document identity.
+      const { session, events } = mountSession(control);
+      await openAndResolve(session, control);
+
+      control.displayCalls.length = 0;
+      const toCh2 = session.display("ch2.xhtml");
+      await waitFor(() => control.displayCalls.length >= 1, "open ch2");
+      control.contentsDocument = ch2Doc;
+      control.displayCalls[0]!.deferred.resolve();
+      await toCh2;
+      expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
+      const locationBeforeFailedNav = session.getLocation()?.cfi;
+
+      events.length = 0;
+      control.displayCalls.length = 0;
+      const displayPromise = session.display("ch3.xhtml");
+      await waitFor(() => control.displayCalls.length >= 1, "nav ch3");
+      control.displayCalls[0]!.deferred.resolve();
+      control.contentsDocument = emptyShell;
+
+      // Rollback display resolves but spine stays on ch3 with a ready Document.
+      control.forceDisplayHref = "ch3.xhtml";
+      const pump = setInterval(() => {
+        if (control.displayCalls.length >= 2) {
+          control.contentsDocument = destDoc;
+        }
+        for (const call of control.displayCalls) {
+          call.deferred.resolve();
+        }
+      }, 20);
+
+      await expect(displayPromise).rejects.toThrow(/recovery|not ready/i);
+      clearInterval(pump);
+      control.forceDisplayHref = null;
+
+      expect(
+        events.some((e) => e.type === "status" && e.status === "idle"),
+      ).toBe(false);
+      expect(session.getLocation()?.spineHref).not.toBe("ch3.xhtml");
+      const locationEvents = events.filter(
+        (e) => e.type === "location",
+      ) as Array<{ type: "location"; location: ReaderLocation }>;
+      const claimedRestore = locationEvents.some(
+        (e) =>
+          e.location.spineHref === "ch2.xhtml" &&
+          e.location.cfi === locationBeforeFailedNav &&
+          control.contentsDocument === destDoc,
+      );
+      expect(claimedRestore).toBe(false);
+      session.destroy();
+    },
+    20_000,
+  );
+
+  it(
+    "does not treat display(undefined) first-spine as restore of mid-book chapter",
+    async () => {
+      const control = createControl();
+      control.sections = [
+        { href: "ch1.xhtml", index: 0 },
+        { href: "ch2.xhtml", index: 1 },
+        { href: "ch3.xhtml", index: 2 },
+      ];
+      const ch2Doc = new DOMParser().parseFromString(
+        "<html><body><p data-ch='2'>第二章</p></body></html>",
+        "text/html",
+      );
+      const emptyShell = new DOMParser().parseFromString(
+        "<html><body></body></html>",
+        "text/html",
+      );
+      const { session, events } = mountSession(control);
+      await openAndResolve(session, control);
+
+      control.displayCalls.length = 0;
+      const toCh2 = session.display("ch2.xhtml");
+      await waitFor(() => control.displayCalls.length >= 1, "to ch2");
+      control.contentsDocument = ch2Doc;
+      control.displayCalls[0]!.deferred.resolve();
+      await toCh2;
+      expect(session.getLocation()?.spineIndex).toBe(1);
+
+      events.length = 0;
+      control.displayCalls.length = 0;
+      const displayPromise = session.display("ch3.xhtml");
+      await waitFor(() => control.displayCalls.length >= 1, "to ch3");
+      control.displayCalls[0]!.deferred.resolve();
+      control.contentsDocument = emptyShell;
+
+      // CFI + href rollback fail; display(undefined) must not be attempted.
+      const pump = setInterval(() => {
+        for (const call of control.displayCalls) {
+          const t = call.target;
+          if (
+            typeof t === "string" &&
+            (t.includes("epubcfi") || t === "ch2.xhtml")
+          ) {
+            call.deferred.reject(new Error("rollback target failed"));
+            continue;
+          }
+          call.deferred.resolve();
+        }
+      }, 20);
+
+      await expect(displayPromise).rejects.toThrow(/recovery|not ready/i);
+      clearInterval(pump);
+
+      const rollbackCalls = control.displayCalls.slice(1);
+      expect(rollbackCalls.every((c) => c.target !== undefined)).toBe(true);
+      expect(
+        events.some((e) => e.type === "status" && e.status === "idle"),
+      ).toBe(false);
+      session.destroy();
+    },
+    20_000,
+  );
 
   it("cross-spine waits for destination ready before tearing down old chapter", async () => {
     const control = createControl();
