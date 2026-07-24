@@ -12,6 +12,8 @@
  */
 
 import type { ConversionMode } from "../domain/types";
+import { readArchiveTextBounded } from "./archive-text";
+import { validateRestorableUrl } from "./archive-url";
 import { ChapterConverter } from "./chapter-converter";
 import {
   injectPackageStylesheets,
@@ -19,7 +21,6 @@ import {
   transformChapter,
   type ChapterTransformResult,
 } from "./chapter-transformer";
-import { validateRestorableUrl } from "./archive-url";
 import {
   createArchiveResolver,
   DEFAULT_RENDITION_OPTIONS,
@@ -360,13 +361,16 @@ class ReaderSessionImpl implements ReaderSession {
         if (!this.isCurrent(gen)) return;
         await this.settleAfterNavigation(gen, before);
         if (!this.isCurrent(gen)) return;
+        // settleAfterNavigation throws if destination never becomes ready —
+        // only emit idle after a usable chapter.
         this.emit({ type: "status", status: "idle" });
       } catch (error) {
         if (!this.isCurrent(gen)) return;
         // Failed navigation must not keep pending incoming resources and must
         // not have revoked live chapter blobs (hook is pending-only).
         this.discardPendingTransform();
-        await this.rebindCurrentChapter();
+        // Skip location sync — rendition may already report destination CFI.
+        await this.rebindCurrentChapter({ skipLocationSync: true });
         this.emit({
           type: "status",
           status: "error",
@@ -421,7 +425,7 @@ class ReaderSessionImpl implements ReaderSession {
       } catch (error) {
         if (!this.isCurrent(gen)) return;
         this.discardPendingTransform();
-        await this.rebindCurrentChapter();
+        await this.rebindCurrentChapter({ skipLocationSync: true });
         this.emit({
           type: "status",
           status: "error",
@@ -436,9 +440,14 @@ class ReaderSessionImpl implements ReaderSession {
 
   /**
    * Shared post-navigation settlement for display / next / prev / resume hops.
-   * Only tear down chapter bindings when the spine (or Document identity) changes.
-   * Same-spine + same-Document CFI/page moves keep converter baseline, image
-   * gates, swipe, and external-link bridges intact.
+   *
+   * Critical ordering for chapter changes:
+   * 1. Keep live chapter state (images, gates, conversion)
+   * 2. Wait until destination Document is ready
+   * 3. Only then commit pending transform / revoke old URLs
+   * 4. Bind/capture the destination
+   *
+   * Throws when destination never becomes ready so callers do not emit idle.
    */
   private async settleAfterNavigation(
     gen: number,
@@ -447,8 +456,6 @@ class ReaderSessionImpl implements ReaderSession {
     if (!this.isCurrent(gen)) return;
 
     // Prefer relocated/reportLocation after the navigation promise settles.
-    // Only accept a location that meaningfully advanced when we already had one;
-    // stale rendition.location must not classify a Document swap as same-spine.
     let nextLoc = await this.awaitMeaningfulLocation(gen, before.location, 600);
     if (!nextLoc) {
       const mapped = await this.readLocationFromRenditionGuarded(gen);
@@ -461,20 +468,13 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
     if (!this.isCurrent(gen)) return;
-    if (nextLoc) {
-      this.location = nextLoc;
-      this.emit({ type: "location", location: nextLoc });
-    }
 
-    const afterDoc =
+    const afterDocProbe =
       readContentsDocument(this.rendition) ||
       readIframeDocument(this.element);
-    // Document identity changed without a location update → treat as chapter
-    // replacement (cross-spine or engine rebuild), never same-spine-replaced
-    // with a stale spine index.
     let kind = classifyTransition(before, {
       location: nextLoc ?? this.location,
-      document: afterDoc,
+      document: afterDocProbe,
       renderEpoch: this.renderEpoch,
       cfi: nextLoc?.cfi ?? this.location?.cfi,
       spineIndex: nextLoc?.spineIndex ?? this.location?.spineIndex,
@@ -483,8 +483,8 @@ class ReaderSessionImpl implements ReaderSession {
     if (
       kind !== "cross-spine" &&
       before.document &&
-      afterDoc &&
-      afterDoc !== before.document &&
+      afterDocProbe &&
+      afterDocProbe !== before.document &&
       before.location &&
       !nextLoc
     ) {
@@ -492,23 +492,27 @@ class ReaderSessionImpl implements ReaderSession {
     }
 
     if (kind === "same-spine-same-document") {
-      // Incoming hook for same Document is not a chapter change — drop pending.
       this.discardPendingTransform();
-      // Keep converter baseline, revealed images, and chapter URLs.
-      // Already bound to this Document with a capture: only refresh overlays —
-      // do not dispose gates or re-run OpenCC on every in-chapter page turn.
-      if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
+      // Publish location only once we know we keep the same usable chapter.
+      if (nextLoc) {
+        this.location = nextLoc;
+        this.emit({ type: "location", location: nextLoc });
+      }
+      if (
+        afterDocProbe &&
+        isChapterDocumentReady(afterDocProbe, this.rendition)
+      ) {
         if (
-          this.lastBoundDocument === afterDoc &&
-          this.converter.hasCaptureFor(afterDoc)
+          this.lastBoundDocument === afterDocProbe &&
+          this.converter.hasCaptureFor(afterDocProbe)
         ) {
           this.repositionParentOverlays();
           return;
         }
-        this.lastBoundDocument = afterDoc;
-        this.bindLiveChapterDocument(afterDoc, { skipCssInject: false });
-        if (!this.converter.hasCaptureFor(afterDoc)) {
-          this.converter.capture(afterDoc);
+        this.lastBoundDocument = afterDocProbe;
+        this.bindLiveChapterDocument(afterDocProbe, { skipCssInject: false });
+        if (!this.converter.hasCaptureFor(afterDocProbe)) {
+          this.converter.capture(afterDocProbe);
         }
         try {
           this.conversionGeneration += 1;
@@ -524,40 +528,88 @@ class ReaderSessionImpl implements ReaderSession {
       return;
     }
 
-    if (kind === "same-spine-replaced-document") {
-      // New live DOM for same chapter — commit pending, rebind.
-      this.commitPendingTransform();
-      this.clearChapterGestures();
-      this.clearParentImageGates();
-      this.clearExternalLinkBridge();
-      this.cssInjectState = null;
-      if (afterDoc && isChapterDocumentReady(afterDoc, this.rendition)) {
-        await this.settleChapterDocument(afterDoc, gen, {
-          forceCapture: !this.converter.hasCaptureFor(afterDoc),
-        });
-      }
-      return;
-    }
-
-    if (kind === "cross-spine") {
-      // Success path: commit pending (revoke old URLs) then settle new chapter.
-      this.commitPendingTransform();
-      this.converter.destroy();
-      this.clearChapterGestures();
-      this.clearParentImageGates();
-      this.clearExternalLinkBridge();
-      this.cssInjectState = null;
-      this.lastBoundDocument = null;
-      // Reject the previous chapter Document only when we had a prior location.
-      await this.afterChapterSettled(gen, {
-        rejectDocument: before.location ? before.document : null,
+    if (
+      kind === "same-spine-replaced-document" ||
+      kind === "cross-spine"
+    ) {
+      // Keep live chapter until destination is ready.
+      const rejectDoc = before.location ? before.document : null;
+      const dest = await this.waitForDestinationDocument(gen, {
+        rejectDocument: rejectDoc,
       });
+      if (!this.isCurrent(gen)) return;
+
+      if (!dest) {
+        // Timeout / empty shell: do not destroy the still-visible chapter.
+        // Do not sync location from rendition — it may already report the
+        // destination CFI while the DOM is still the previous chapter.
+        this.discardPendingTransform();
+        await this.rebindCurrentChapter({ skipLocationSync: true });
+        throw new Error("Chapter document not ready after navigation");
+      }
+
+      // Destination ready — now safe to publish location and tear down old.
+      if (nextLoc) {
+        this.location = nextLoc;
+        this.emit({ type: "location", location: nextLoc });
+      }
+
+      this.commitPendingTransform();
+      if (kind === "cross-spine") {
+        this.converter.destroy();
+      }
+      this.clearChapterGestures();
+      this.clearParentImageGates();
+      this.clearExternalLinkBridge();
+      this.cssInjectState = null;
+      if (kind === "cross-spine") {
+        this.lastBoundDocument = null;
+      }
+
+      await this.settleChapterDocument(dest, gen, {
+        forceCapture:
+          kind === "cross-spine" || !this.converter.hasCaptureFor(dest),
+      });
+      if (!this.isCurrent(gen)) return;
+      await this.syncLocationFromRenditionAsync();
       return;
     }
 
     // no-transition (boundary or stale): keep chapter usable; drop pending only.
     this.discardPendingTransform();
+    if (nextLoc) {
+      this.location = nextLoc;
+      this.emit({ type: "location", location: nextLoc });
+    }
     await this.rebindCurrentChapter();
+  }
+
+  /**
+   * Wait until a ready chapter Document appears that is not the rejected
+   * previous identity. Does not mutate live chapter state.
+   */
+  private async waitForDestinationDocument(
+    gen: number,
+    options: { rejectDocument?: Document | null },
+  ): Promise<Document | null> {
+    const rejectDoc = options.rejectDocument ?? null;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (!this.isCurrent(gen)) return null;
+      const candidate =
+        readContentsDocument(this.rendition) ||
+        readIframeDocument(this.element);
+      const isRejected = Boolean(
+        rejectDoc && candidate && candidate === rejectDoc,
+      );
+      if (
+        !isRejected &&
+        isChapterDocumentReady(candidate, this.rendition)
+      ) {
+        return candidate;
+      }
+      await Promise.race([waitMs(40), this.waitForNextRender(50)]);
+    }
+    return null;
   }
 
   private snapshotTransition(): TransitionSnapshot {
@@ -958,47 +1010,6 @@ class ReaderSessionImpl implements ReaderSession {
     }
   }
 
-  private async afterChapterSettled(
-    gen: number,
-    options?: { rejectDocument?: Document | null },
-  ): Promise<void> {
-    if (!this.isCurrent(gen)) return;
-
-    // Only reject a document when the caller knows the section changed
-    // (display/open/setFlow, or next/prev across a spine boundary).
-    // In-chapter next/prev and resize rebind keep the same Document identity.
-    const rejectDoc = options?.rejectDocument ?? null;
-    let doc: Document | null = null;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const candidate =
-        readContentsDocument(this.rendition) ||
-        readIframeDocument(this.element);
-      const isStale = Boolean(rejectDoc && candidate && candidate === rejectDoc);
-      if (
-        !isStale &&
-        isChapterDocumentReady(candidate, this.rendition)
-      ) {
-        doc = candidate;
-        break;
-      }
-      // Prefer waiting on the real rendered lifecycle when we still see the
-      // previous document (or an empty shell).
-      await Promise.race([waitMs(40), this.waitForNextRender(50)]);
-      if (!this.isCurrent(gen)) return;
-    }
-
-    if (doc) {
-      this.pendingLateChapterRebindGen = null;
-      await this.settleChapterDocument(doc, gen, { forceCapture: true });
-    } else if (this.isCurrent(gen)) {
-      // Chapter may still be rendering; arm one-shot repair on later `rendered`.
-      this.pendingLateChapterRebindGen = gen;
-    }
-
-    if (!this.isCurrent(gen)) return;
-    await this.syncLocationFromRenditionAsync();
-  }
-
   /**
    * Bind gates/gestures and apply conversion for a ready chapter document.
    * @param forceCapture when true, always recapture originals (new chapter).
@@ -1081,15 +1092,35 @@ class ReaderSessionImpl implements ReaderSession {
    * Does NOT recapture originals when the same document is already captured —
    * that would bake converted text in as the new “原文” baseline.
    */
-  private async rebindCurrentChapter(): Promise<void> {
+  private async rebindCurrentChapter(options?: {
+    skipLocationSync?: boolean;
+  }): Promise<void> {
     const doc =
+      this.lastBoundDocument ||
       readContentsDocument(this.rendition) ||
       readIframeDocument(this.element);
-    if (!doc || !isChapterDocumentReady(doc, this.rendition)) return;
+    if (!doc || !isChapterDocumentReady(doc, this.rendition)) {
+      // Prefer lastBoundDocument when live probe is empty shell after failed hop.
+      if (
+        this.lastBoundDocument &&
+        this.lastBoundDocument.body &&
+        this.lastBoundDocument.body.childNodes.length > 0
+      ) {
+        await this.settleChapterDocument(this.lastBoundDocument, this.generation, {
+          forceCapture: false,
+        });
+      }
+      if (!options?.skipLocationSync) {
+        await this.syncLocationFromRenditionAsync();
+      }
+      return;
+    }
     await this.settleChapterDocument(doc, this.generation, {
       forceCapture: false,
     });
-    await this.syncLocationFromRenditionAsync();
+    if (!options?.skipLocationSync) {
+      await this.syncLocationFromRenditionAsync();
+    }
   }
 
   private bindLiveChapterDocument(
@@ -1119,51 +1150,41 @@ class ReaderSessionImpl implements ReaderSession {
     // Touch/click inside the chapter iframe do not bubble to the parent —
     // attach gestures on the live chapter document.
     this.installChapterGestures(doc);
-    // Inject package CSS as sanitized <style> (archive-wide replacements off).
-    // Single-flight per Document — settle may call bind twice.
-    if (materialize && !options?.skipCssInject) {
-      this.scheduleCssInject(doc, materialize);
+    // Inject package CSS as sanitized <style> via bounded archive reader
+    // (never createUrl). Single-flight per Document.
+    if (!options?.skipCssInject) {
+      this.scheduleCssInject(doc);
     }
   }
 
   /**
-   * One CSS injection promise per Document until teardown. Prevents double
-   * materialize storms when settleChapterDocument binds before and after OpenCC.
+   * One CSS injection promise per Document until teardown.
+   * Uses bounded archive text reader — never createUrl for stylesheets.
    */
-  private scheduleCssInject(
-    doc: Document,
-    materialize: (
-      packagePath: string,
-      options?: { maxBytes?: number; timeoutMs?: number },
-    ) => Promise<string | null>,
-  ): void {
+  private scheduleCssInject(doc: Document): void {
     if (this.cssInjectState?.doc === doc) {
       return;
     }
+    const book = this.book;
+    if (!book) return;
     const gen = this.generation;
     const matGen = this.chapterMaterializationGeneration;
-    const promise = injectPackageStylesheets(doc, materialize, {
+    const readCss = async (path: string, maxBytes: number) => {
+      if (
+        this.destroyed ||
+        gen !== this.generation ||
+        matGen !== this.chapterMaterializationGeneration
+      ) {
+        return null;
+      }
+      return readArchiveTextBounded(book, path, maxBytes);
+    };
+    const promise = injectPackageStylesheets(doc, readCss, {
       isStale: () =>
         this.destroyed ||
         gen !== this.generation ||
         matGen !== this.chapterMaterializationGeneration ||
         this.cssInjectState?.doc !== doc,
-      revokeUrl: (url) => {
-        try {
-          getRevokeObjectURL()(url);
-        } catch {
-          // ignore
-        }
-        this.chapterObjectUrls.delete(url);
-        this.ownedObjectUrls.delete(url);
-        if (this.book) {
-          try {
-            purgeArchiveUrlCache(this.book, [url]);
-          } catch {
-            // ignore
-          }
-        }
-      },
     })
       .then(() => {
         if (this.cssInjectState?.doc === doc) {

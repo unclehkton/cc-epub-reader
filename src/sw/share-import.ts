@@ -235,14 +235,12 @@ export async function getShareInboxEntry(
     ) {
       return undefined;
     }
-    // Return ArrayBuffer identity for single-read validate; Blob only as
-    // optional convenience (lazy wrapper — do not arrayBuffer it again).
+    // ArrayBuffer only — do not allocate a parallel Blob copy for promote.
     return {
       id: record.id,
       fileName: record.fileName,
       byteLength: record.byteLength,
       epubBytes,
-      epub: new Blob([epubBytes], { type: "application/epub+zip" }),
       receivedAt: record.receivedAt,
     };
   } finally {

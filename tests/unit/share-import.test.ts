@@ -213,10 +213,10 @@ describe("handleShareTarget", () => {
     const staged = await getShareInboxEntry(id!);
     expect(staged?.fileName).toBe("from-share.epub");
     expect(staged?.byteLength).toBe(file.size);
-    // Staged payload is ArrayBuffer identity for single-read validate.
+    // Staged payload is ArrayBuffer identity — no parallel Blob wrapper.
     expect(staged?.epubBytes).toBeInstanceOf(ArrayBuffer);
     expect(staged?.epubBytes?.byteLength).toBe(file.size);
-    expect(staged?.epub).toBeInstanceOf(Blob);
+    expect(staged?.epub).toBeUndefined();
 
     fetchSpy.mockRestore();
   });

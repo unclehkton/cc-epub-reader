@@ -289,12 +289,17 @@ describe("EPUB.js spine.hooks.content order (pre-serialization)", () => {
             },
             flow: vi.fn(),
             getContents() {
-              return {
-                document: new DOMParser().parseFromString(
+              // Stable identity required — readiness re-probes getContents.
+              const r = rendition as AdaptedRendition & {
+                _stableDoc?: Document;
+              };
+              if (!r._stableDoc) {
+                r._stableDoc = new DOMParser().parseFromString(
                   "<html><body><p>文字</p></body></html>",
                   "text/html",
-                ),
-              };
+                );
+              }
+              return { document: r._stableDoc };
             },
           };
           return rendition;

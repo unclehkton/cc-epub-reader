@@ -17,6 +17,7 @@ import {
   resolveArchiveSrcset,
   validateRestorableUrl,
 } from "./archive-url";
+import { utf8ByteLength } from "./archive-text";
 import {
   MAX_AGGREGATE_CSS_BYTES,
   MAX_SINGLE_CSS_BYTES,
@@ -32,6 +33,15 @@ export type { ArchiveResolver };
 export type MaterializeArchiveUrl = (
   packagePath: string,
   options?: { maxBytes?: number; timeoutMs?: number },
+) => Promise<string | null>;
+
+/**
+ * Bounded CSS text loader — must NOT use createUrl/Blob.
+ * Implementations should stream archive bytes and abort past maxBytes.
+ */
+export type ReadArchiveCssText = (
+  packagePath: string,
+  maxBytes: number,
 ) => Promise<string | null>;
 
 export interface ChapterTransformResult {
@@ -537,24 +547,16 @@ function stripRemoteStylesheets(
 
 /** Cumulative wall-clock budget for all stylesheet attempts on one chapter. */
 export const CSS_INJECT_TOTAL_TIMEOUT_MS = 6_000;
-/** Per-stylesheet materialize timeout (shared budget still applies). */
-export const CSS_INJECT_PER_SHEET_TIMEOUT_MS = 1_500;
 
 /**
- * Materialize package stylesheets marked with data-epub-css and inject as
- * sanitized <style> into the live chapter document.
- *
- * Attempted-link budget is applied up front (`slice(0, MAX)`). Each candidate
- * is size-capped at materialize (256 KiB) before keep; CSS blob is revoked
- * after text is read. Aggregate + cumulative timeout fail closed.
+ * Load package stylesheets via a bounded archive text reader (no createUrl).
+ * Attempt budget is applied up front. Aggregate uses UTF-8 byte lengths.
  */
 export async function injectPackageStylesheets(
   doc: Document,
-  materialize: MaterializeArchiveUrl,
+  readCssText: ReadArchiveCssText,
   options?: {
     isStale?: () => boolean;
-    /** Optional revoke for temporary CSS blobs after text extraction. */
-    revokeUrl?: (url: string) => void;
   },
 ): Promise<void> {
   const allLinks = Array.from(
@@ -566,10 +568,9 @@ export async function injectPackageStylesheets(
     extra.remove();
   }
 
-  let aggregate = 0;
+  let aggregateBytes = 0;
   const deadline = Date.now() + CSS_INJECT_TOTAL_TIMEOUT_MS;
   const isStale = options?.isStale ?? (() => false);
-  const revokeUrl = options?.revokeUrl;
 
   for (const link of links) {
     if (isStale() || Date.now() > deadline) {
@@ -584,59 +585,41 @@ export async function injectPackageStylesheets(
       link.remove();
       continue;
     }
-    // Materialize with CSS size ceiling — drop before returning a huge blob.
-    let url: string | null = null;
+
+    // Remaining aggregate budget for this sheet.
+    const room = MAX_AGGREGATE_CSS_BYTES - aggregateBytes;
+    if (room <= 0) {
+      link.remove();
+      continue;
+    }
+    const sheetCap = Math.min(MAX_SINGLE_CSS_BYTES, room);
+
+    let text: string | null = null;
     try {
-      url = await materialize(path, {
-        maxBytes: MAX_SINGLE_CSS_BYTES,
-        timeoutMs: Math.max(
-          200,
-          Math.min(CSS_INJECT_PER_SHEET_TIMEOUT_MS, deadline - Date.now()),
-        ),
-      });
+      text = await readCssText(path, sheetCap);
     } catch {
-      url = null;
-    }
-    if (isStale()) {
-      if (url?.startsWith("blob:") && revokeUrl) revokeUrl(url);
-      link.remove();
-      continue;
-    }
-    if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
-      link.remove();
-      continue;
-    }
-    let text = "";
-    try {
-      const res = await fetch(url);
-      // Bound text read via blob size already checked; still clamp length.
-      text = await res.text();
-    } catch {
-      if (url.startsWith("blob:") && revokeUrl) revokeUrl(url);
-      link.remove();
-      continue;
-    }
-    // Temporary CSS blob no longer needed once text is in memory.
-    if (url.startsWith("blob:") && revokeUrl) {
-      try {
-        revokeUrl(url);
-      } catch {
-        // ignore
-      }
-    }
-    if (text.length > MAX_SINGLE_CSS_BYTES) {
-      link.remove();
-      continue;
-    }
-    aggregate += text.length;
-    if (aggregate > MAX_AGGREGATE_CSS_BYTES) {
-      link.remove();
-      continue;
+      text = null;
     }
     if (isStale()) {
       link.remove();
       continue;
     }
+    if (text == null || text === "") {
+      link.remove();
+      continue;
+    }
+
+    const bytes = utf8ByteLength(text);
+    if (bytes > MAX_SINGLE_CSS_BYTES) {
+      link.remove();
+      continue;
+    }
+    aggregateBytes += bytes;
+    if (aggregateBytes > MAX_AGGREGATE_CSS_BYTES) {
+      link.remove();
+      continue;
+    }
+
     const style = doc.createElement("style");
     style.setAttribute("data-epub-injected-css", "1");
     const media = link.getAttribute("media");

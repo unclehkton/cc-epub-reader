@@ -74,6 +74,8 @@ interface FakeControl {
   imageUrl: Deferred<string>;
   /** Override getContents() document for readiness/stale-doc tests. */
   contentsDocument: Document | null;
+  /** Stable default when contentsDocument is null (must not allocate per probe). */
+  defaultContentsDocument: Document | null;
   /**
    * When true, `next()` clears sync location and only exposes the new location
    * via async currentLocation() — covers Promise path for spine detection.
@@ -87,6 +89,7 @@ interface FakeControl {
   sameSpinePaging: boolean;
   emit(event: string, payload?: unknown): void;
   setLocation(partial: Partial<AdaptedLocation["start"]> & { cfi: string }): void;
+  mintContentsForSpine(href: string): void;
 }
 
 function createFakeFactory(control: FakeControl): EpubFactory {
@@ -211,6 +214,7 @@ function createFakeFactory(control: FakeControl): EpubFactory {
               displayed: { page: 1, total: control.sameSpinePaging ? 4 : 4 },
             },
           };
+          control.mintContentsForSpine(href);
           if (control.asyncLocationAfterNext) {
             // Sync location intentionally stale / cleared until promise resolves.
             control.location = null;
@@ -282,12 +286,15 @@ function createFakeFactory(control: FakeControl): EpubFactory {
         if (control.contentsDocument) {
           return { document: control.contentsDocument };
         }
-        return {
-          document: new DOMParser().parseFromString(
+        // Stable identity — isChapterDocumentReady re-probes getContents and
+        // rejects when the candidate identity changes on every call.
+        if (!control.defaultContentsDocument) {
+          control.defaultContentsDocument = new DOMParser().parseFromString(
             "<html><body><p>章節文字</p></body></html>",
             "text/html",
-          ),
-        };
+          );
+        }
+        return { document: control.defaultContentsDocument };
       },
       currentLocation() {
         if (control.asyncLocationAfterNext && control.asyncLocationDeferred) {
@@ -379,6 +386,7 @@ function createControl(): FakeControl {
     imageCreateCalls: [],
     imageUrl: deferred<string>(),
     contentsDocument: null,
+    defaultContentsDocument: null,
     asyncLocationAfterNext: false,
     asyncLocationDeferred: null,
     sameSpinePaging: false,
@@ -389,18 +397,33 @@ function createControl(): FakeControl {
         listener(payload);
       }
     },
+    mintContentsForSpine(href: string) {
+      if (control.contentsDocument) return;
+      const prevHref = control.location?.start.href;
+      if (prevHref !== href || !control.defaultContentsDocument) {
+        control.defaultContentsDocument = new DOMParser().parseFromString(
+          `<html><body><p data-href="${href}">章節文字 ${href}</p></body></html>`,
+          "text/html",
+        );
+      }
+    },
     setLocation(partial) {
+      const href = partial.href ?? "ch1.xhtml";
+      const index = partial.index ?? 0;
+      // When tests do not pin contentsDocument, mint a new Document identity
+      // on spine changes — mirrors EPUB.js replacing the chapter document.
+      control.mintContentsForSpine(href);
       control.location = {
         start: {
-          index: partial.index ?? 0,
-          href: partial.href ?? "ch1.xhtml",
+          index,
+          href,
           cfi: partial.cfi,
           displayed: partial.displayed ?? { page: 1, total: 4 },
           percentage: partial.percentage,
         },
         end: {
-          index: partial.index ?? 0,
-          href: partial.href ?? "ch1.xhtml",
+          index,
+          href,
           cfi: partial.cfi,
           displayed: partial.displayed ?? { page: 1, total: 4 },
         },
@@ -705,33 +728,70 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
-  it("late rendered after settle timeout still binds chapter controls", async () => {
+  it("cross-spine never-ready keeps old chapter and does not emit idle success", async () => {
     const control = createControl();
     const oldDoc = new DOMParser().parseFromString(
       "<html><body><p data-old='1'>舊</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = oldDoc;
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    events.length = 0;
+
+    const displayPromise = session.display("ch2.xhtml");
+    await waitFor(() => control.displayCalls.length >= 1, "late display");
+    // Resolve navigation while Document stays on the old chapter forever.
+    control.displayCalls[control.displayCalls.length - 1]!.deferred.resolve();
+
+    await expect(displayPromise).rejects.toThrow(/not ready/i);
+    expect(
+      events.some((e) => e.type === "status" && e.status === "error"),
+    ).toBe(true);
+    // Must not report idle success after a failed destination settle.
+    expect(
+      events.some((e) => e.type === "status" && e.status === "idle"),
+    ).toBe(false);
+    // Old chapter remains interactive; location not advanced to ch2.
+    expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
+    events.length = 0;
+    oldDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+    session.destroy();
+  });
+
+  it("cross-spine waits for destination ready before tearing down old chapter", async () => {
+    const control = createControl();
+    const oldDoc = new DOMParser().parseFromString(
+      "<html><body><p data-old='1'>舊章</p></body></html>",
+      "text/html",
+    );
+    const emptyShell = new DOMParser().parseFromString(
+      "<html><body></body></html>",
       "text/html",
     );
     const newDoc = new DOMParser().parseFromString(
       "<html><body><p data-new='1'>新章</p></body></html>",
       "text/html",
     );
-    // Bind first chapter on a stable document so lastBoundDocument === oldDoc.
     control.contentsDocument = oldDoc;
     const { session, events } = mountSession(control);
     await openAndResolve(session, control);
 
+    // Track that old chapter still receives taps while shell is empty.
+    control.displayCalls.length = 0;
     const displayPromise = session.display("ch2.xhtml");
-    await waitFor(() => control.displayCalls.length >= 2, "late display");
-    control.displayCalls[control.displayCalls.length - 1]!.deferred.resolve();
+    await waitFor(() => control.displayCalls.length >= 1, "display ch2");
+    control.displayCalls[0]!.deferred.resolve();
+    // Briefly expose empty shell (not ready) then real destination.
+    control.contentsDocument = emptyShell;
+    setTimeout(() => {
+      control.contentsDocument = newDoc;
+      control.emit("rendered");
+    }, 100);
 
-    // Keep returning the rejected old document past the ~1.2s settle window.
     await displayPromise;
-
-    // Now the real document appears after timeout — rendered must late-rebind.
-    control.contentsDocument = newDoc;
-    control.emit("rendered");
-    await new Promise((r) => setTimeout(r, 100));
-
+    expect(session.getLocation()?.spineHref).toBe("ch2.xhtml");
     events.length = 0;
     newDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
     expect(events.some((e) => e.type === "content-tap")).toBe(true);

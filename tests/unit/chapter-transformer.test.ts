@@ -363,32 +363,54 @@ describe("transformChapter sanitizer", () => {
     }).join("");
     const doc = parseHtml(`<!DOCTYPE html><html><head>${links}</head><body></body></html>`);
 
-    let materializeCalls = 0;
-    const materialize = vi.fn(async () => {
-      materializeCalls += 1;
-      // Simulate missing assets — previously these would not count toward the cap.
+    let readCalls = 0;
+    const readCss = vi.fn(async () => {
+      readCalls += 1;
       return null;
     });
 
-    await injectPackageStylesheets(doc, materialize);
+    await injectPackageStylesheets(doc, readCss);
 
-    expect(materializeCalls).toBe(MAX_STYLESHEETS_PER_CHAPTER);
-    // Tail beyond the attempt budget is removed without awaiting.
+    expect(readCalls).toBe(MAX_STYLESHEETS_PER_CHAPTER);
     expect(doc.querySelectorAll("link[data-epub-css]").length).toBe(0);
   });
 
-  it("passes CSS maxBytes into materialize so huge sheets are rejected early", async () => {
+  it("passes per-sheet maxBytes into bounded CSS reader (not createUrl)", async () => {
     const doc = parseHtml(
       `<!DOCTYPE html><html><head>
         <link rel="stylesheet" data-epub-css="styles/huge.css">
       </head><body></body></html>`,
     );
-    const materialize = vi.fn(async (_path: string, options?: { maxBytes?: number }) => {
-      expect(options?.maxBytes).toBeLessThanOrEqual(256 * 1024);
+    const readCss = vi.fn(async (_path: string, maxBytes: number) => {
+      expect(maxBytes).toBeLessThanOrEqual(256 * 1024);
       return null;
     });
-    await injectPackageStylesheets(doc, materialize);
-    expect(materialize).toHaveBeenCalled();
+    await injectPackageStylesheets(doc, readCss);
+    expect(readCss).toHaveBeenCalled();
+  });
+
+  it("stops aggregate CSS at 512 KiB UTF-8 bytes", async () => {
+    // Three ~200 KiB sheets should stop after the third attempt exceeds aggregate.
+    const chunk = "a".repeat(200 * 1024);
+    const links = Array.from({ length: 5 }, (_, i) => {
+      return `<link rel="stylesheet" data-epub-css="styles/s${i}.css">`;
+    }).join("");
+    const doc = parseHtml(
+      `<!DOCTYPE html><html><head>${links}</head><body></body></html>`,
+    );
+    let calls = 0;
+    const readCss = vi.fn(async () => {
+      calls += 1;
+      return chunk;
+    });
+    await injectPackageStylesheets(doc, readCss);
+    // First two fit (400 KiB); third may load then reject on aggregate, or
+    // room for third is 112 KiB so maxBytes is capped and reader returns null
+    // depending on mock — mock always returns 200 KiB so third is dropped after
+    // byte check. Ensure we do not inject more than aggregate allows.
+    const styles = doc.querySelectorAll("style[data-epub-injected-css]");
+    expect(styles.length).toBeLessThanOrEqual(2);
+    expect(calls).toBeGreaterThanOrEqual(2);
   });
 
   it("normalizes protocol-relative external links for parent open bridge", () => {
