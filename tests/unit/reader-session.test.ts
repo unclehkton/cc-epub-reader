@@ -744,7 +744,16 @@ describe("ReaderSession generation ownership", () => {
     // Resolve navigation while Document stays on the old chapter forever.
     control.displayCalls[control.displayCalls.length - 1]!.deferred.resolve();
 
-    await expect(displayPromise).rejects.toThrow(/not ready/i);
+    // Rollback may issue additional display() calls — resolve them while
+    // keeping the live contents on the still-ready old document.
+    const pump = setInterval(() => {
+      for (const call of control.displayCalls) {
+        call.deferred.resolve();
+      }
+    }, 20);
+
+    await expect(displayPromise).rejects.toThrow(/not ready|recovery/i);
+    clearInterval(pump);
     expect(
       events.some((e) => e.type === "status" && e.status === "error"),
     ).toBe(true);
@@ -755,7 +764,68 @@ describe("ReaderSession generation ownership", () => {
     // Old chapter remains interactive; location not advanced to ch2.
     expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
     events.length = 0;
-    oldDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    // Use live getContents document identity (same as oldDoc while pinned).
+    const live = control.contentsDocument;
+    expect(live).toBe(oldDoc);
+    live?.body?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(events.some((e) => e.type === "content-tap")).toBe(true);
+    session.destroy();
+  });
+
+  it("empty-shell timeout rolls back via display to a restored live Document", async () => {
+    const control = createControl();
+    const oldDoc = new DOMParser().parseFromString(
+      "<html><body><p data-old='1'>舊章</p></body></html>",
+      "text/html",
+    );
+    const emptyShell = new DOMParser().parseFromString(
+      "<html><body></body></html>",
+      "text/html",
+    );
+    // Distinct restored live Document after rollback (not the detached oldDoc).
+    const restoredDoc = new DOMParser().parseFromString(
+      "<html><body><p data-restored='1'>已還原</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = oldDoc;
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    const oldHref = session.getLocation()?.spineHref;
+    expect(oldHref).toBe("ch1.xhtml");
+
+    events.length = 0;
+    control.displayCalls.length = 0;
+    const displayPromise = session.display("ch2.xhtml");
+    await waitFor(() => control.displayCalls.length >= 1, "nav display");
+    control.displayCalls[0]!.deferred.resolve();
+    // Permanent empty shell — destination never becomes ready.
+    control.contentsDocument = emptyShell;
+
+    // When settlement times out, rollback issues display(cfi/href). Resolve
+    // those and expose a restored ready Document on the live path.
+    const pump = setInterval(() => {
+      if (control.displayCalls.length >= 2) {
+        control.contentsDocument = restoredDoc;
+      }
+      for (const call of control.displayCalls) {
+        call.deferred.resolve();
+      }
+    }, 20);
+
+    await expect(displayPromise).rejects.toThrow(/not ready|recovery/i);
+    clearInterval(pump);
+
+    // Rollback must have invoked at least one extra display.
+    expect(control.displayCalls.length).toBeGreaterThanOrEqual(2);
+    // Live contents identity is the restored Document, not the empty shell.
+    expect(control.contentsDocument).toBe(restoredDoc);
+    expect(control.contentsDocument).not.toBe(oldDoc);
+    expect(control.contentsDocument).not.toBe(emptyShell);
+    expect(session.getLocation()?.spineHref).toBe("ch1.xhtml");
+
+    // Content tap must hit the restored *live* document (not detached oldDoc).
+    events.length = 0;
+    restoredDoc.body?.dispatchEvent(new Event("click", { bubbles: true }));
     expect(events.some((e) => e.type === "content-tap")).toBe(true);
     session.destroy();
   });

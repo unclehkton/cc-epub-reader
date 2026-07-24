@@ -37,11 +37,12 @@ export type MaterializeArchiveUrl = (
 
 /**
  * Bounded CSS text loader — must NOT use createUrl/Blob.
- * Implementations should stream archive bytes and abort past maxBytes.
+ * Implementations should stream archive bytes and abort past maxBytes / timeout.
  */
 export type ReadArchiveCssText = (
   packagePath: string,
   maxBytes: number,
+  timeoutMs?: number,
 ) => Promise<string | null>;
 
 export interface ChapterTransformResult {
@@ -593,10 +594,16 @@ export async function injectPackageStylesheets(
       continue;
     }
     const sheetCap = Math.min(MAX_SINGLE_CSS_BYTES, room);
+    // Pass remaining wall-clock budget so a stalled stream cannot hang inject.
+    const remainingMs = Math.max(0, deadline - Date.now());
+    if (remainingMs <= 0) {
+      link.remove();
+      continue;
+    }
 
     let text: string | null = null;
     try {
-      text = await readCssText(path, sheetCap);
+      text = await readCssText(path, sheetCap, remainingMs);
     } catch {
       text = null;
     }

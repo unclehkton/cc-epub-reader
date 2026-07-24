@@ -1,6 +1,8 @@
 /**
  * Bounded archive text reader for package CSS and other small text assets.
- * Never uses createUrl / Blob — streams entry bytes and aborts past maxBytes.
+ * Never uses createUrl / Blob — streams entry bytes and aborts past maxBytes
+ * or wall-clock timeout. Fail closed when internalStream is unavailable
+ * (async full-entry load would allocate unbounded).
  */
 
 import type { AdaptedBook } from "./epub-adapter";
@@ -21,6 +23,13 @@ export interface ArchiveEntryStream {
 
 export interface ArchiveZipLike {
   file(path: string): ArchiveZipEntry | null | undefined;
+}
+
+export interface ReadArchiveTextOptions {
+  maxBytes: number;
+  /** Wall-clock deadline for the stream (ms). */
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 function declaredUncompressedSize(entry: ArchiveZipEntry): number | undefined {
@@ -62,16 +71,13 @@ export function archivePathCandidates(
   for (const c of raw) {
     const cleaned = c.replace(/^\/+/, "");
     out.add(cleaned);
-    // Some archives store with leading slash internally.
     out.add(`/${cleaned}`);
   }
   return Array.from(out);
 }
 
 function getArchiveZip(book: AdaptedBook): ArchiveZipLike | null {
-  const archive = book.archive as
-    | { zip?: ArchiveZipLike }
-    | undefined;
+  const archive = book.archive as { zip?: ArchiveZipLike } | undefined;
   if (archive?.zip && typeof archive.zip.file === "function") {
     return archive.zip;
   }
@@ -84,7 +90,6 @@ function findEntry(
 ): ArchiveZipEntry | null {
   for (const candidate of candidates) {
     try {
-      // epubjs getBlob strips leading slash then decodeURIComponent.
       const stripped = candidate.replace(/^\/+/, "");
       const decoded = (() => {
         try {
@@ -104,18 +109,32 @@ function findEntry(
   return null;
 }
 
+function normalizeOptions(
+  maxBytesOrOptions: number | ReadArchiveTextOptions,
+): ReadArchiveTextOptions {
+  if (typeof maxBytesOrOptions === "number") {
+    return { maxBytes: maxBytesOrOptions };
+  }
+  return maxBytesOrOptions;
+}
+
 /**
- * Read a text archive entry with a hard uncompressed byte ceiling.
- * - Rejects when declared size exceeds maxBytes (before any inflate/stream).
- * - Streams via internalStream when available; aborts once actual bytes > max.
- * - Never calls createUrl or builds a Blob URL.
+ * Read a text archive entry with hard byte + wall-clock ceilings.
+ * - Declared size over maxBytes → null before stream starts
+ * - Stream aborts when actual bytes > maxBytes
+ * - Stream aborts on timeoutMs / AbortSignal (pause + release chunks)
+ * - No createUrl; no entry.async full inflate (fail closed without stream)
  */
 export async function readArchiveTextBounded(
   book: AdaptedBook,
   packagePath: string,
-  maxBytes: number,
+  maxBytesOrOptions: number | ReadArchiveTextOptions,
 ): Promise<string | null> {
+  const options = normalizeOptions(maxBytesOrOptions);
+  const maxBytes = options.maxBytes;
   if (maxBytes <= 0) return null;
+  if (options.signal?.aborted) return null;
+
   const zip = getArchiveZip(book);
   if (!zip) return null;
 
@@ -128,56 +147,97 @@ export async function readArchiveTextBounded(
     return null;
   }
 
-  // Prefer streaming so forged small declared sizes still abort at maxBytes.
-  if (typeof entry.internalStream === "function") {
-    try {
-      const bytes = await streamEntryBounded(entry, maxBytes);
-      if (!bytes) return null;
-      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-    } catch {
-      return null;
-    }
+  // Fail closed: without internalStream we would need full entry.async inflate.
+  if (typeof entry.internalStream !== "function") {
+    return null;
   }
 
-  // Fallback: async uint8array with post-check (still no createUrl/blob URL).
-  // Prefer avoiding this for huge entries — declared check already ran.
-  if (typeof entry.async === "function") {
-    try {
-      const raw = await entry.async("uint8array");
-      if (!(raw instanceof Uint8Array)) return null;
-      if (raw.byteLength > maxBytes) return null;
-      return new TextDecoder("utf-8", { fatal: false }).decode(raw);
-    } catch {
-      return null;
-    }
+  try {
+    const bytes = await streamEntryBounded(entry, {
+      maxBytes,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+    });
+    if (!bytes) return null;
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  } catch {
+    return null;
   }
-
-  return null;
 }
 
 function streamEntryBounded(
   entry: ArchiveZipEntry,
-  maxBytes: number,
+  options: {
+    maxBytes: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
 ): Promise<Uint8Array | null> {
-  return new Promise((resolve, reject) => {
-    const stream = entry.internalStream!("uint8array");
+  const { maxBytes, timeoutMs, signal } = options;
+  return new Promise((resolve) => {
+    let stream: ArchiveEntryStream;
+    try {
+      stream = entry.internalStream!("uint8array");
+    } catch {
+      resolve(null);
+      return;
+    }
+
     const chunks: Uint8Array[] = [];
     let total = 0;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const finish = (result: Uint8Array | null, error?: unknown) => {
+    const releaseChunks = () => {
+      chunks.length = 0;
+      total = 0;
+    };
+
+    const finish = (result: Uint8Array | null) => {
       if (settled) return;
       settled = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (signal && onAbort) {
+        try {
+          signal.removeEventListener("abort", onAbort);
+        } catch {
+          // ignore
+        }
+      }
       try {
         stream.pause?.();
       } catch {
         // ignore
       }
-      if (error) reject(error);
-      else resolve(result);
+      if (result == null) {
+        releaseChunks();
+      }
+      resolve(result);
     };
 
+    const onAbort = () => {
+      finish(null);
+    };
+
+    if (typeof timeoutMs === "number" && timeoutMs >= 0) {
+      timer = setTimeout(() => {
+        finish(null);
+      }, timeoutMs);
+    }
+
+    if (signal) {
+      if (signal.aborted) {
+        finish(null);
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
     stream.on("data", (chunk: unknown) => {
+      if (settled) return;
       const part =
         chunk instanceof Uint8Array
           ? chunk
@@ -189,10 +249,11 @@ function streamEntryBounded(
       }
       chunks.push(part);
     });
-    stream.on("error", (err: unknown) => {
-      finish(null, err);
+    stream.on("error", () => {
+      finish(null);
     });
     stream.on("end", () => {
+      if (settled) return;
       if (total > maxBytes) {
         finish(null);
         return;
@@ -203,12 +264,13 @@ function streamEntryBounded(
         out.set(c, offset);
         offset += c.byteLength;
       }
+      releaseChunks();
       finish(out);
     });
     try {
       stream.resume?.();
-    } catch (err) {
-      finish(null, err);
+    } catch {
+      finish(null);
     }
   });
 }
@@ -218,7 +280,6 @@ export function utf8ByteLength(text: string): number {
   if (typeof TextEncoder !== "undefined") {
     return new TextEncoder().encode(text).byteLength;
   }
-  // Fallback approximation
   let n = 0;
   for (let i = 0; i < text.length; i += 1) {
     const code = text.charCodeAt(i);

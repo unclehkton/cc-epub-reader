@@ -6,7 +6,10 @@ import {
 } from "../../src/reader/archive-text";
 import type { AdaptedBook } from "../../src/reader/epub-adapter";
 
-function makeBook(entry: ArchiveZipEntry | null, createUrl?: () => Promise<string>): AdaptedBook {
+function makeBook(
+  entry: ArchiveZipEntry | null,
+  createUrl?: () => Promise<string>,
+): AdaptedBook {
   const create = createUrl ?? vi.fn(async () => "blob:should-not-call");
   return {
     ready: Promise.resolve(),
@@ -22,7 +25,10 @@ function makeBook(entry: ArchiveZipEntry | null, createUrl?: () => Promise<strin
       createUrl: create,
       zip: {
         file(path: string) {
-          if (path.replace(/^\//, "").includes("style") || path.includes("css")) {
+          if (
+            path.replace(/^\//, "").includes("style") ||
+            path.includes("css")
+          ) {
             return entry;
           }
           return null;
@@ -41,15 +47,17 @@ describe("readArchiveTextBounded", () => {
     };
     const createUrl = vi.fn(async () => "blob:x");
     const book = makeBook(entry, createUrl);
-    const text = await readArchiveTextBounded(book, "styles/huge.css", 256 * 1024);
+    const text = await readArchiveTextBounded(book, "styles/huge.css", {
+      maxBytes: 256 * 1024,
+    });
     expect(text).toBeNull();
     expect(stream).not.toHaveBeenCalled();
     expect(createUrl).not.toHaveBeenCalled();
   });
 
   it("aborts stream once actual bytes exceed maxBytes", async () => {
+    const pause = vi.fn();
     const entry: ArchiveZipEntry = {
-      // Forged small declared size
       uncompressedSize: 1,
       internalStream: () => {
         const handlers: Record<string, Array<(...a: unknown[]) => void>> = {};
@@ -59,23 +67,71 @@ describe("readArchiveTextBounded", () => {
             return stream;
           },
           resume() {
-            // Emit 300 KiB of data in chunks
             const chunk = new Uint8Array(100 * 1024);
             handlers.data?.forEach((cb) => cb(chunk));
             handlers.data?.forEach((cb) => cb(chunk));
             handlers.data?.forEach((cb) => cb(chunk));
             handlers.end?.forEach((cb) => cb());
           },
-          pause() {},
+          pause,
         };
         return stream;
       },
     };
     const createUrl = vi.fn(async () => "blob:x");
     const book = makeBook(entry, createUrl);
-    const text = await readArchiveTextBounded(book, "OEBPS/Styles/x.css", 256 * 1024);
+    const text = await readArchiveTextBounded(book, "OEBPS/Styles/x.css", {
+      maxBytes: 256 * 1024,
+    });
     expect(text).toBeNull();
     expect(createUrl).not.toHaveBeenCalled();
+    expect(pause).toHaveBeenCalled();
+  });
+
+  it("returns null after wall-clock timeout on stalled stream and pauses", async () => {
+    const pause = vi.fn();
+    const entry: ArchiveZipEntry = {
+      uncompressedSize: 1024,
+      internalStream: () => {
+        const handlers: Record<string, Array<(...a: unknown[]) => void>> = {};
+        const stream = {
+          on(event: string, cb: (...a: unknown[]) => void) {
+            (handlers[event] ??= []).push(cb);
+            return stream;
+          },
+          resume() {
+            // One small chunk then stall forever (no end/error).
+            handlers.data?.forEach((cb) => cb(new Uint8Array([1, 2, 3])));
+          },
+          pause,
+        };
+        return stream;
+      },
+    };
+    const book = makeBook(entry);
+    const started = Date.now();
+    const text = await readArchiveTextBounded(book, "styles/stall.css", {
+      maxBytes: 256 * 1024,
+      timeoutMs: 80,
+    });
+    expect(text).toBeNull();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(70);
+    expect(pause).toHaveBeenCalled();
+  });
+
+  it("fails closed for async-only entries without internalStream", async () => {
+    const asyncFn = vi.fn(async () => new Uint8Array(300 * 1024));
+    const entry: ArchiveZipEntry = {
+      uncompressedSize: 100,
+      async: asyncFn,
+      // no internalStream
+    };
+    const book = makeBook(entry);
+    const text = await readArchiveTextBounded(book, "styles/x.css", {
+      maxBytes: 256 * 1024,
+    });
+    expect(text).toBeNull();
+    expect(asyncFn).not.toHaveBeenCalled();
   });
 
   it("returns decoded text for a small streamed entry", async () => {

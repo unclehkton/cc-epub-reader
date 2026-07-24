@@ -540,11 +540,13 @@ class ReaderSessionImpl implements ReaderSession {
       if (!this.isCurrent(gen)) return;
 
       if (!dest) {
-        // Timeout / empty shell: do not destroy the still-visible chapter.
-        // Do not sync location from rendition — it may already report the
-        // destination CFI while the DOM is still the previous chapter.
-        this.discardPendingTransform();
-        await this.rebindCurrentChapter({ skipLocationSync: true });
+        // Timeout / empty shell: iframe may already be a blank shell while
+        // lastBoundDocument is a detached previous Document. Must roll back
+        // the rendition to a live ready Document — not only rebind detached A.
+        const recovered = await this.rollbackAfterFailedSettlement(gen, before);
+        if (!recovered) {
+          throw new Error("Chapter recovery failed after navigation timeout");
+        }
         throw new Error("Chapter document not ready after navigation");
       }
 
@@ -590,10 +592,11 @@ class ReaderSessionImpl implements ReaderSession {
    */
   private async waitForDestinationDocument(
     gen: number,
-    options: { rejectDocument?: Document | null },
+    options: { rejectDocument?: Document | null; maxAttempts?: number },
   ): Promise<Document | null> {
     const rejectDoc = options.rejectDocument ?? null;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+    const maxAttempts = options.maxAttempts ?? 30;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (!this.isCurrent(gen)) return null;
       const candidate =
         readContentsDocument(this.rendition) ||
@@ -610,6 +613,87 @@ class ReaderSessionImpl implements ReaderSession {
       await Promise.race([waitMs(40), this.waitForNextRender(50)]);
     }
     return null;
+  }
+
+  /**
+   * After settlement timeout the iframe may show an empty shell while
+   * `lastBoundDocument` still points at a detached previous Document.
+   * Re-display the previous CFI/spine and bind the restored *live* Document.
+   * @returns true when a ready live document was restored
+   */
+  private async rollbackAfterFailedSettlement(
+    gen: number,
+    before: TransitionSnapshot,
+  ): Promise<boolean> {
+    this.discardPendingTransform();
+    if (!this.isCurrent(gen) || !this.rendition) return false;
+
+    const targets: Array<string | undefined> = [];
+    const cfi = before.location?.cfi ?? before.cfi;
+    const href =
+      before.location?.spineHref ?? before.spineHref ?? undefined;
+    if (typeof cfi === "string" && cfi.includes("epubcfi")) {
+      targets.push(cfi);
+    }
+    if (typeof href === "string" && href.trim()) {
+      targets.push(href.trim());
+    }
+    // Last resort: first spine item.
+    targets.push(undefined);
+
+    const rendition = this.rendition;
+    for (const target of targets) {
+      if (!this.isCurrent(gen) || this.rendition !== rendition) return false;
+      try {
+        await rendition.display(target);
+      } catch {
+        continue;
+      }
+      if (!this.isCurrent(gen) || this.rendition !== rendition) return false;
+
+      // Accept any ready live document after rollback (shell must be gone).
+      const live = await this.waitForDestinationDocument(gen, {
+        rejectDocument: null,
+        maxAttempts: 20,
+      });
+      if (!this.isCurrent(gen)) return false;
+      if (!live) continue;
+
+      // Restore pre-navigation location for progress / UI.
+      if (before.location) {
+        const restored: ReaderLocation = {
+          cfi: before.location.cfi,
+          spineHref: before.location.spineHref,
+          spineIndex: before.location.spineIndex,
+          spineCount:
+            typeof before.location.spineCount === "number"
+              ? before.location.spineCount
+              : this.spineCount,
+          chapterPage: before.location.chapterPage,
+          chapterPages:
+            typeof before.location.chapterPages === "number"
+              ? before.location.chapterPages
+              : Math.max(1, before.location.chapterPage),
+          approximatePercent:
+            typeof before.location.approximatePercent === "number"
+              ? before.location.approximatePercent
+              : 0,
+        };
+        this.location = restored;
+        this.emit({ type: "location", location: restored });
+      }
+
+      // Detached previous Document must not be preferred over the live iframe.
+      if (this.lastBoundDocument && this.lastBoundDocument !== live) {
+        this.lastBoundDocument = null;
+      }
+      this.cssInjectState = null;
+      await this.settleChapterDocument(live, gen, {
+        forceCapture: !this.converter.hasCaptureFor(live),
+      });
+      return true;
+    }
+    return false;
   }
 
   private snapshotTransition(): TransitionSnapshot {
@@ -1169,7 +1253,11 @@ class ReaderSessionImpl implements ReaderSession {
     if (!book) return;
     const gen = this.generation;
     const matGen = this.chapterMaterializationGeneration;
-    const readCss = async (path: string, maxBytes: number) => {
+    const readCss = async (
+      path: string,
+      maxBytes: number,
+      timeoutMs?: number,
+    ) => {
       if (
         this.destroyed ||
         gen !== this.generation ||
@@ -1177,7 +1265,10 @@ class ReaderSessionImpl implements ReaderSession {
       ) {
         return null;
       }
-      return readArchiveTextBounded(book, path, maxBytes);
+      return readArchiveTextBounded(book, path, {
+        maxBytes,
+        timeoutMs,
+      });
     };
     const promise = injectPackageStylesheets(doc, readCss, {
       isStale: () =>
