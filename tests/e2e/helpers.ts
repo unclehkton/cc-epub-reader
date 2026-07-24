@@ -12,6 +12,10 @@ export const FIXTURE_LARGE = path.resolve(
   __dirname,
   "../fixtures/large-chapter.epub",
 );
+export const FIXTURE_MIXED_LAYOUT = path.resolve(
+  __dirname,
+  "../fixtures/mixed-layout.epub",
+);
 
 /** Second copy of the reader fixture under a distinct file name for dual-import tests. */
 export const FIXTURE_READER_B = FIXTURE_READER;
