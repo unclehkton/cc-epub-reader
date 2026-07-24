@@ -64,6 +64,8 @@ Static hosting only — **no** Pages Functions, Workers, Durable Objects, or oth
 
 | Setting | Value |
 | --- | --- |
+| **Project** | `books-pkwor` |
+| **Production URL** | https://books.pkwor.com |
 | **Build command** | `npm run build` |
 | **Build output directory** | `dist` |
 | **Root directory** | repository root (default) |
@@ -74,7 +76,17 @@ Deployed artifacts include:
 - `dist/_headers` — `X-Content-Type-Options`, `Referrer-Policy`, and CSP
 - `dist/_redirects` — SPA GET fallback to `/index.html` (`200`); share-target POST remains SW-only
 
-Custom domain (e.g. `books.pkwor.com`) and DNS are external prerequisites. Attach HTTPS on Pages after the production build is verified locally.
+### Deploy gotcha (agents)
+
+**Production ≠ any successful `wrangler pages deploy`.**  
+This project’s Production branch has been `feature/release-0.1`. Deploying with `--branch=main` can create a **Preview** only; `books.pkwor.com` keeps serving the last **Production** deployment.
+
+Always:
+
+1. `wrangler pages deployment list --project-name=books-pkwor` (Environment = Production)
+2. Confirm `https://books.pkwor.com` HTML references the same `assets/index-*.js` hash as local `dist/`
+
+See [AGENTS.md](./AGENTS.md) for the full checklist.
 
 ## License
 
