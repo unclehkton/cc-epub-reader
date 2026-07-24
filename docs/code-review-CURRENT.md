@@ -5,7 +5,7 @@
 
 ## Verdict
 
-Automated matrix on this worktree is the only green claim. **Physical iPhone Safari and live `books.pkwor.com` are not claimed.** Deploy only after those and a fresh independent re-review of the latest commit.
+**Merged and deployed (2026-07-24):** exact SHA `88d20c0cc96580d8b57d7207a133089b9c1fa679` on `main`, Cloudflare Pages project `books-pkwor` (`books.pkwor.com` / `main.books-pkwor.pages.dev`). Review scope remaining P1: 0; merge decision: APPROVED for this SHA only.
 
 ## Current residual risk (honest)
 
