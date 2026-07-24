@@ -8,6 +8,7 @@ test-results/
 .agents/
 AGENTS.md
 AGENTS.local.md
+.wrangler/
 .DS_Store
 *.log
 *.tsbuildinfo
