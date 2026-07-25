@@ -177,6 +177,11 @@ class ReaderSessionImpl implements ReaderSession {
   /** Debounce token for geometry rebind — never shares nav generation. */
   private resizeToken = 0;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * rAF coalescing for appearance-driven relayout (font/margin). Ensures
+   * themes CSS injects before epub.js remeasures paginated columns.
+   */
+  private appearanceRelayoutRaf: number | null = null;
   /** Bumps on EPUB.js `rendered`; used to reject stale chapter documents. */
   private renderEpoch = 0;
   private pendingRenderWaiters: Array<() => void> = [];
@@ -980,26 +985,45 @@ class ReaderSessionImpl implements ReaderSession {
 
   applyAppearance(settings: AppearanceSettings): void {
     if (this.destroyed) return;
-    this.appearance = { ...settings };
-    const rendition = this.rendition;
-    if (!rendition?.themes) return;
+    const prev = this.appearance;
+    const next: AppearanceSettings = {
+      fontSizePercent: settings.fontSizePercent,
+      fontFamily: settings.fontFamily,
+      background: settings.background,
+      theme: settings.theme,
+      horizontalMarginPercent: Math.max(
+        0,
+        Math.min(20, Math.round(settings.horizontalMarginPercent ?? 4)),
+      ),
+    };
+    // Font/family/margin change paginated column metrics; color/theme do not.
+    // Without a resize, epub.js keeps the old column geometry and WebKit can
+    // expose multiple page-columns side-by-side until the next navigation.
+    const metricsChanged =
+      prev.fontSizePercent !== next.fontSizePercent ||
+      prev.fontFamily !== next.fontFamily ||
+      (prev.horizontalMarginPercent ?? 4) !== (next.horizontalMarginPercent ?? 4);
 
-    const resolvedTheme = resolveTheme(settings.theme);
+    this.appearance = next;
+    const rendition = this.rendition;
+    if (!rendition?.themes) {
+      // Retain settings; schedule relayout once a rendition exists if needed.
+      if (metricsChanged) this.scheduleAppearanceRelayout();
+      return;
+    }
+
+    const resolvedTheme = resolveTheme(next.theme);
     const themeColors = THEME_COLORS[resolvedTheme];
     const background =
       resolvedTheme === "night"
         ? themeColors.background
-        : BACKGROUNDS[settings.background];
+        : BACKGROUNDS[next.background];
     const color = themeColors.color;
-    const marginPercent = Math.max(
-      0,
-      Math.min(20, Math.round(settings.horizontalMarginPercent ?? 4)),
-    );
-    const margin = `${marginPercent}%`;
+    const margin = `${next.horizontalMarginPercent ?? 4}%`;
 
     try {
-      rendition.themes.fontSize(`${settings.fontSizePercent}%`);
-      rendition.themes.font(FONT_STACKS[settings.fontFamily]);
+      rendition.themes.fontSize(`${next.fontSizePercent}%`);
+      rendition.themes.font(FONT_STACKS[next.fontFamily]);
       rendition.themes.override("color", color, true);
       rendition.themes.override("background-color", background, true);
       rendition.themes.override("background", background, true);
@@ -1015,6 +1039,10 @@ class ReaderSessionImpl implements ReaderSession {
     } catch {
       // ignore
     }
+
+    if (metricsChanged) {
+      this.scheduleAppearanceRelayout();
+    }
   }
 
   destroy(): void {
@@ -1023,6 +1051,10 @@ class ReaderSessionImpl implements ReaderSession {
     this.destroyed = true;
     this.inflightOps = 0;
     this.resizeToken += 1;
+    if (this.appearanceRelayoutRaf !== null) {
+      cancelAnimationFrame(this.appearanceRelayoutRaf);
+      this.appearanceRelayoutRaf = null;
+    }
     if (this.resizeTimer !== null) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
@@ -1063,6 +1095,23 @@ class ReaderSessionImpl implements ReaderSession {
     await rendition.display(target);
     if (!this.isCurrent(gen)) return;
     await this.settleAfterNavigation(gen, before);
+  }
+
+  /**
+   * After font/margin theme inject, wait one frame so content.css has painted,
+   * then resize so paginated multi-column geometry matches the new metrics.
+   * Coalesces rapid A+/A− taps into a single resize.
+   */
+  private scheduleAppearanceRelayout(): void {
+    if (this.destroyed) return;
+    if (this.appearanceRelayoutRaf !== null) {
+      cancelAnimationFrame(this.appearanceRelayoutRaf);
+    }
+    this.appearanceRelayoutRaf = requestAnimationFrame(() => {
+      this.appearanceRelayoutRaf = null;
+      if (this.destroyed || !this.rendition) return;
+      this.resize();
+    });
   }
 
   /**
