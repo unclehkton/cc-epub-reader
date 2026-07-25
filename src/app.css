@@ -490,15 +490,28 @@ button {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  max-width: 100%;
   background: var(--reader-surface);
   /* EPUB.js mounts iframe children here */
   /* Allow horizontal swipe paging; avoid double-tap zoom on the stage. */
   touch-action: pan-y manipulation;
 }
 
+/* Paginated only: clip multi-column bleed while epub.js remeasures after
+   font/margin changes. Scrolled mode must not inherit overflow:hidden on the
+   host — the manager may scroll a descendant or the host itself. */
+.reader-screen--paginated .reader-host {
+  overflow: hidden;
+}
+
 .reader-host > * {
   width: 100% !important;
+  max-width: 100% !important;
   height: 100% !important;
+}
+
+.reader-host iframe {
+  max-width: 100% !important;
 }
 
 .reader-edge {

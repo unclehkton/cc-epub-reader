@@ -1,13 +1,19 @@
 import { test, expect } from "@playwright/test";
 import {
+  FIXTURE_LARGE,
   FIXTURE_MIXED_LAYOUT,
   FIXTURE_READER,
+  bumpFontSize,
   closeReader,
   contentTextIncludes,
   gotoLibrary,
   importEpub,
   openBook,
+  readPaginatedStageGeometry,
+  readReaderLocation,
+  setFlow,
   waitForBookTitle,
+  waitForStableReaderLocation,
 } from "./helpers";
 
 test.describe("mobile", () => {
@@ -79,6 +85,104 @@ test.describe("mobile", () => {
       await page.setViewportSize({ width, height: 900 });
     }
     expect(await contentTextIncludes(page, /第一章 開端/, 15_000)).toBe(true);
+  });
+
+  test("font size changes keep a single paginated column inside the viewport", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    await expect(page.locator(".reader-screen--paginated")).toBeVisible();
+    const before = await waitForStableReaderLocation(page);
+    expect(before.spineHref.length).toBeGreaterThan(0);
+    const geometryBefore = await readPaginatedStageGeometry(page);
+    expect(geometryBefore.singleVisiblePage).toBe(true);
+
+    // Rapid A+ taps — the real user path that used to flash multi-columns.
+    await bumpFontSize(page, 3);
+
+    await expect
+      .poll(async () => {
+        const g = await readPaginatedStageGeometry(page);
+        return g.singleVisiblePage;
+      }, { timeout: 15_000 })
+      .toBe(true);
+
+    const geometry = await readPaginatedStageGeometry(page);
+    expect(geometry.stageRight).toBeLessThanOrEqual(geometry.viewportWidth + 2);
+    expect(geometry.hostRight).toBeLessThanOrEqual(geometry.viewportWidth + 2);
+    expect(geometry.nextEdgeRight).toBeLessThanOrEqual(geometry.viewportWidth + 2);
+    // Host must not expand after font-size reflow (multi-column flash grows it).
+    expect(geometry.hostWidth).toBeLessThanOrEqual(geometryBefore.hostWidth + 4);
+
+    const afterFont = await waitForStableReaderLocation(page);
+    expect(afterFont.spineHref).toBe(before.spineHref);
+
+    await page.getByRole("button", { name: "下一頁" }).first().click();
+    const afterNext = await waitForStableReaderLocation(page);
+    expect(
+      afterNext.cfi !== afterFont.cfi ||
+        afterNext.percent !== afterFont.percent,
+    ).toBe(true);
+  });
+
+  test("scrolled flow remains scrollable after host containment CSS", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    await setFlow(page, "捲動");
+    await expect(page.locator(".reader-screen--scrolled")).toBeVisible();
+    await page.waitForTimeout(600);
+
+    const scrollProbe = await page.evaluate(() => {
+      const host = document.querySelector(".reader-host") as HTMLElement | null;
+      if (!host) return { found: false as const };
+
+      const candidates: HTMLElement[] = [host];
+      host.querySelectorAll("*").forEach((el) => {
+        if (el instanceof HTMLElement) candidates.push(el);
+      });
+
+      for (const el of candidates) {
+        if (el.scrollHeight > el.clientHeight + 8) {
+          const before = el.scrollTop;
+          el.scrollTop = Math.min(el.scrollHeight, before + 240);
+          const after = el.scrollTop;
+          return {
+            found: true as const,
+            scrollHeight: el.scrollHeight,
+            clientHeight: el.clientHeight,
+            before,
+            after,
+            hostOverflow: getComputedStyle(host).overflow,
+          };
+        }
+      }
+      return { found: false as const };
+    });
+
+    expect(scrollProbe.found).toBe(true);
+    if (scrollProbe.found) {
+      expect(scrollProbe.scrollHeight).toBeGreaterThan(scrollProbe.clientHeight);
+      expect(scrollProbe.after).toBeGreaterThan(scrollProbe.before);
+      // Scrolled mode must not force host overflow:hidden (paginated-only clip).
+      expect(scrollProbe.hostOverflow).not.toMatch(/hidden/i);
+    }
+
+    // End of chapter remains reachable via location progress after scroll.
+    const loc = await readReaderLocation(page);
+    expect(loc.spineHref.length).toBeGreaterThan(0);
   });
 
   test("supports portrait and landscape reading chrome", async ({ page }) => {

@@ -199,12 +199,79 @@ export async function openSettings(page: Page): Promise<void> {
   await expect(page.getByRole("dialog", { name: "閱讀設定" })).toBeVisible();
 }
 
-async function closeSettings(page: Page): Promise<void> {
+export async function closeSettings(page: Page): Promise<void> {
   const dialog = page.getByRole("dialog", { name: "閱讀設定" });
   // Prefer the in-sheet close control; the backdrop shares the same accessible name
   // but is covered by the sheet and cannot receive pointer events.
   await dialog.getByRole("button", { name: "關閉設定" }).click();
   await expect(dialog).toBeHidden();
+}
+
+/** Bump font size via settings (A+). Leaves the sheet closed. */
+export async function bumpFontSize(page: Page, times = 1): Promise<void> {
+  await openSettings(page);
+  const enlarge = page.getByRole("button", { name: "放大文字" });
+  for (let i = 0; i < times; i += 1) {
+    await enlarge.click();
+  }
+  // Two rAF + resize rebind (120ms) + epub.js column remeasure.
+  await page.waitForTimeout(500);
+  await closeSettings(page);
+}
+
+/**
+ * Visible geometry for paginated multi-column bleed detection.
+ *
+ * epub.js sizes the chapter iframe to the full multi-column scroll width
+ * (often thousands of px). That is normal. The user-visible bug is the *host*
+ * expanding so several page-columns fit side-by-side in the viewport.
+ * Assert host/stage/next-edge stay within the viewport and host stays a
+ * single-page width (not multi-column expanded).
+ */
+export async function readPaginatedStageGeometry(page: Page): Promise<{
+  viewportWidth: number;
+  stageWidth: number;
+  stageRight: number;
+  hostWidth: number;
+  hostRight: number;
+  nextEdgeRight: number;
+  withinViewport: boolean;
+  singleVisiblePage: boolean;
+}> {
+  return page.evaluate(() => {
+    const stage = document.querySelector(".reader-stage")?.getBoundingClientRect();
+    const host = document.querySelector(".reader-host") as HTMLElement | null;
+    const hostRect = host?.getBoundingClientRect();
+    const next = document
+      .querySelector(".reader-edge--next")
+      ?.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const stageWidth = stage?.width ?? Number.POSITIVE_INFINITY;
+    const stageRight = stage?.right ?? Number.POSITIVE_INFINITY;
+    const hostWidth = hostRect?.width ?? Number.POSITIVE_INFINITY;
+    const hostRight = hostRect?.right ?? Number.POSITIVE_INFINITY;
+    const nextEdgeRight = next?.right ?? Number.POSITIVE_INFINITY;
+    const tol = 2;
+    // Host is the clip box: must stay inside the stage and the viewport.
+    // If multi-columns were shown, host would grow toward stage/viewport width
+    // times N (or past the next edge).
+    const hostWithinStage = hostWidth <= stageWidth + tol && hostRight <= stageRight + tol;
+    const withinViewport =
+      stageRight <= viewportWidth + tol &&
+      hostRight <= viewportWidth + tol &&
+      nextEdgeRight <= viewportWidth + tol &&
+      stageWidth <= viewportWidth + tol;
+    return {
+      viewportWidth,
+      stageWidth,
+      stageRight,
+      hostWidth,
+      hostRight,
+      nextEdgeRight,
+      withinViewport,
+      singleVisiblePage: withinViewport && hostWithinStage,
+    };
+  });
 }
 
 export async function setFlow(

@@ -628,6 +628,105 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
+  async function flushAppearanceRelayout(): Promise<void> {
+    // applyAppearance waits two parent animation frames before resize.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+  }
+
+  it("relayouts after font size change so paginated columns remeasure", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+    control.resizeCalls.length = 0;
+
+    session.applyAppearance({
+      fontSizePercent: 130,
+      fontFamily: "book",
+      background: "rice",
+      theme: "system",
+      horizontalMarginPercent: 4,
+    });
+
+    // Themes inject synchronously; resize is deferred two frames.
+    expect(control.resizeCalls).toHaveLength(0);
+    await flushAppearanceRelayout();
+    expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
+
+    session.destroy();
+  });
+
+  it("does not resize for color-only appearance changes", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+    control.resizeCalls.length = 0;
+
+    session.applyAppearance({
+      fontSizePercent: 100,
+      fontFamily: "book",
+      background: "white",
+      theme: "night",
+      horizontalMarginPercent: 4,
+    });
+
+    await flushAppearanceRelayout();
+    expect(control.resizeCalls).toHaveLength(0);
+
+    session.destroy();
+  });
+
+  it("coalesces rapid font size taps into a single appearance resize", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+    control.resizeCalls.length = 0;
+
+    session.applyAppearance({
+      fontSizePercent: 110,
+      fontFamily: "book",
+      background: "rice",
+      theme: "system",
+    });
+    session.applyAppearance({
+      fontSizePercent: 120,
+      fontFamily: "book",
+      background: "rice",
+      theme: "system",
+    });
+    session.applyAppearance({
+      fontSizePercent: 130,
+      fontFamily: "book",
+      background: "rice",
+      theme: "system",
+    });
+
+    await flushAppearanceRelayout();
+    expect(control.resizeCalls).toHaveLength(1);
+
+    session.destroy();
+  });
+
+  it("relayouts after horizontal margin change", async () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+    control.resizeCalls.length = 0;
+
+    session.applyAppearance({
+      fontSizePercent: 100,
+      fontFamily: "book",
+      background: "rice",
+      theme: "system",
+      horizontalMarginPercent: 12,
+    });
+
+    await flushAppearanceRelayout();
+    expect(control.resizeCalls).toHaveLength(1);
+
+    session.destroy();
+  });
+
   it("resize rebind does not recapture original text baseline", async () => {
     const captureSpy = vi.spyOn(ChapterConverter.prototype, "capture");
     const control = createControl();
