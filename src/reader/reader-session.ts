@@ -1098,8 +1098,8 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   /**
-   * After font/margin theme inject, wait one frame so content.css has painted,
-   * then resize so paginated multi-column geometry matches the new metrics.
+   * After font/margin theme inject, wait two parent frames so theme CSS can
+   * propagate into the chapter iframe before epub.js remeasures columns.
    * Coalesces rapid A+/A− taps into a single resize.
    */
   private scheduleAppearanceRelayout(): void {
@@ -1108,9 +1108,15 @@ class ReaderSessionImpl implements ReaderSession {
       cancelAnimationFrame(this.appearanceRelayoutRaf);
     }
     this.appearanceRelayoutRaf = requestAnimationFrame(() => {
-      this.appearanceRelayoutRaf = null;
-      if (this.destroyed || !this.rendition) return;
-      this.resize();
+      if (this.destroyed) {
+        this.appearanceRelayoutRaf = null;
+        return;
+      }
+      this.appearanceRelayoutRaf = requestAnimationFrame(() => {
+        this.appearanceRelayoutRaf = null;
+        if (this.destroyed || !this.rendition) return;
+        this.resize();
+      });
     });
   }
 

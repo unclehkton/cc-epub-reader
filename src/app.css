@@ -491,14 +491,17 @@ button {
   min-height: 0;
   height: 100%;
   max-width: 100%;
-  /* Clip multi-column bleed if epub.js column geometry is briefly stale
-     (e.g. font-size change before resize reformat). Do not force overflow on
-     children — scrolled flow needs the manager's own overflow. */
-  overflow: hidden;
   background: var(--reader-surface);
   /* EPUB.js mounts iframe children here */
   /* Allow horizontal swipe paging; avoid double-tap zoom on the stage. */
   touch-action: pan-y manipulation;
+}
+
+/* Paginated only: clip multi-column bleed while epub.js remeasures after
+   font/margin changes. Scrolled mode must not inherit overflow:hidden on the
+   host — the manager may scroll a descendant or the host itself. */
+.reader-screen--paginated .reader-host {
+  overflow: hidden;
 }
 
 .reader-host > * {

@@ -628,6 +628,12 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
+  async function flushAppearanceRelayout(): Promise<void> {
+    // applyAppearance waits two parent animation frames before resize.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+  }
+
   it("relayouts after font size change so paginated columns remeasure", async () => {
     const control = createControl();
     const { session } = mountSession(control);
@@ -642,9 +648,9 @@ describe("ReaderSession generation ownership", () => {
       horizontalMarginPercent: 4,
     });
 
-    // Themes inject synchronously; resize is deferred one frame.
+    // Themes inject synchronously; resize is deferred two frames.
     expect(control.resizeCalls).toHaveLength(0);
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await flushAppearanceRelayout();
     expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
 
     session.destroy();
@@ -664,7 +670,7 @@ describe("ReaderSession generation ownership", () => {
       horizontalMarginPercent: 4,
     });
 
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await flushAppearanceRelayout();
     expect(control.resizeCalls).toHaveLength(0);
 
     session.destroy();
@@ -695,7 +701,7 @@ describe("ReaderSession generation ownership", () => {
       theme: "system",
     });
 
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await flushAppearanceRelayout();
     expect(control.resizeCalls).toHaveLength(1);
 
     session.destroy();
@@ -715,7 +721,7 @@ describe("ReaderSession generation ownership", () => {
       horizontalMarginPercent: 12,
     });
 
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await flushAppearanceRelayout();
     expect(control.resizeCalls).toHaveLength(1);
 
     session.destroy();
