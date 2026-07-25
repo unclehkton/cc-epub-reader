@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
+  FIXTURE_MIXED_LAYOUT,
   FIXTURE_READER,
   closeReader,
   contentTextIncludes,
@@ -10,6 +11,54 @@ import {
 } from "./helpers";
 
 test.describe("mobile", () => {
+  test("keeps long paginated chapters and both page edges inside the phone viewport", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_MIXED_LAYOUT);
+    await waitForBookTitle(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+    await openBook(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+
+    for (let pageTurn = 0; pageTurn < 3; pageTurn += 1) {
+      await page
+        .getByRole("button", { name: "下一頁" })
+        .first()
+        .evaluate((element) => (element as HTMLButtonElement).click());
+      await page.waitForTimeout(400);
+    }
+
+    await expect
+      .poll(async () =>
+        page.evaluate(() => {
+          const stage = document
+            .querySelector(".reader-stage")
+            ?.getBoundingClientRect();
+          const next = document
+            .querySelector(".reader-edge--next")
+            ?.getBoundingClientRect();
+          return {
+            viewportWidth: window.innerWidth,
+            stageRight: stage?.right ?? Number.POSITIVE_INFINITY,
+            nextRight: next?.right ?? Number.POSITIVE_INFINITY,
+          };
+        }),
+      )
+      .toEqual({
+        viewportWidth: 390,
+        stageRight: 390,
+        nextRight: 390,
+      });
+
+    await page.getByRole("button", { name: "下一頁" }).first().click();
+  });
+
   test("keeps chapter content visible when the window crosses the side-panel breakpoint", async ({
     page,
   }) => {

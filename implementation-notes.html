@@ -34,6 +34,15 @@
     <li><strong>Release commits:</strong> resize fix <code>3063ac4</code>; Cloudflare privacy guard <code>a4649a7</code>.</li>
   </ul>
 
+  <h2>2026-07-25 mobile pagination overflow fix</h2>
+  <ul>
+    <li><strong>Reported symptom:</strong> a supplied EPUB displayed partial lines near the beginning of the book, placed the next-page target beyond the right edge of an iPhone viewport, and surfaced EPUB.js&rsquo;s <code>No Section Found</code> message when the reader could no longer be advanced normally.</li>
+    <li><strong>Root cause:</strong> the reader shell used only implicit CSS grid columns. A long, non-wrapping book title contributed its min-content width to that implicit track, expanding the internal stage beyond the fixed viewport. In the supplied 390px Mobile Safari reproduction, the shell remained 390px while the stage grew to 696.5px and EPUB.js paginated against a 608.5px content host.</li>
+    <li><strong>Fix:</strong> the reader shell now declares <code>grid-template-columns: minmax(0, 1fr)</code>. The existing ellipsis can therefore shrink the title within the viewport, and the EPUB stage, content host, and both 44px page-edge targets stay correctly bounded.</li>
+    <li><strong>Regression coverage:</strong> a repository-owned mixed fixed/reflowable EPUB fixture with a deliberately long title reproduces the overflow without retaining the user-supplied book. The mobile E2E test advances through the fixed pages into a long reflowable chapter, asserts exact 390px stage and next-edge bounds, and performs a real next-page click.</li>
+    <li><strong>Verification:</strong> the supplied EPUB advanced with ordinary Mobile Safari clicks through all pages of <code>Preface2.xhtml</code> into <code>Preface3.xhtml</code>; every measured stage was 390px, the next edge stayed at x=346&ndash;390, and no alert appeared. Fresh gates: TypeScript pass; <strong>228/228</strong> Vitest tests; production/PWA build pass; shell <strong>74,706 bytes gzip</strong>; audit <strong>0 vulnerabilities</strong>; Playwright <strong>48/48</strong> across Chromium, WebKit, Mobile Chrome, and Mobile Safari.</li>
+  </ul>
+
   <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>
