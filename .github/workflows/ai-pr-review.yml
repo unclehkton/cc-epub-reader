@@ -1,0 +1,65 @@
+# Canonical thin caller - pinned to ai-pr-reviewer commit de1ae5178c306824b6f5f3f6ff27ae63f37fd938
+# Do NOT use @main in production.
+#
+# Security notes:
+# - pull_request_target exposes repository secrets; never check out PR head.
+# - Untrusted fork PRs need label ai-review-approved before model calls.
+# - Optional deep pass: label ai-review-deep (requires labeled event).
+# - Secret required: NVIDIA_API_KEY
+
+name: AI PR Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+concurrency:
+  group: ai-pr-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  ai-review:
+    if: |
+      !github.event.pull_request.draft &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ai-review-deep')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Capture PR diff
+        run: gh pr diff "$PR_NUMBER" --repo "$REPO" > pr.diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+
+      - name: Post AI PR review comment
+        id: ai
+        uses: unclehkton/ai-pr-reviewer@de1ae5178c306824b6f5f3f6ff27ae63f37fd938
+        with:
+          base_url: https://integrate.api.nvidia.com/v1
+          allow_custom_base_url: false
+          tier1_model: z-ai/glm-5.2
+          tier2_model: minimaxai/minimax-m3
+          tier2_mode: auto
+          comment_mode: update
+          fail_open: true
+          max_retries: 2
+          request_timeout_ms: 90000
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          PR_DIFF_PATH: pr.diff
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
