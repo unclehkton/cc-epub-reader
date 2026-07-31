@@ -17,6 +17,52 @@ import {
 } from "./helpers";
 
 test.describe("mobile", () => {
+  test("shows uninstalled-phone home-screen guidance without blocking import", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+
+    await expect(
+      page.getByRole("heading", { name: "將書庫加入主畫面" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "匯入 EPUB" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "關閉安裝提示" })).toBeVisible();
+
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+    if (/iphone|ipod/i.test(userAgent)) {
+      await expect(page.getByText(/Safari 分享按鈕/)).toBeVisible();
+    } else {
+      await expect(page.getByText(/Chrome.*選單/)).toBeVisible();
+    }
+  });
+
+  test("hides home-screen guidance in standalone display mode", async ({ page }) => {
+    await page.addInitScript(() => {
+      const originalMatchMedia = window.matchMedia.bind(window);
+      window.matchMedia = (query: string) => {
+        if (query === "(display-mode: standalone)") {
+          return {
+            matches: true,
+            media: query,
+            onchange: null,
+            addEventListener: () => undefined,
+            removeEventListener: () => undefined,
+            addListener: () => undefined,
+            removeListener: () => undefined,
+            dispatchEvent: () => false,
+          } as MediaQueryList;
+        }
+        return originalMatchMedia(query);
+      };
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await expect(
+      page.getByRole("heading", { name: "將書庫加入主畫面" }),
+    ).toBeHidden();
+  });
+
   test("keeps long paginated chapters and both page edges inside the phone viewport", async ({
     page,
   }) => {
@@ -63,6 +109,61 @@ test.describe("mobile", () => {
       });
 
     await page.getByRole("button", { name: "下一頁" }).first().click();
+  });
+
+  test("routes paginated iframe touch targets to the reader stage for swipe turns", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_READER);
+    await waitForBookTitle(page, "閱讀夾具");
+    await openBook(page, "閱讀夾具");
+
+    const before = await waitForStableReaderLocation(page);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const host = document.querySelector(".reader-host") as HTMLElement | null;
+          const iframe = host?.querySelector("iframe");
+          if (!host || !iframe) return { ready: false };
+          const rect = host.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          );
+          return {
+            ready: true,
+            iframePointerEvents: getComputedStyle(iframe).pointerEvents,
+            hitsReaderHost: Boolean(hit?.closest(".reader-host")),
+          };
+        }),
+      )
+      .toEqual({
+        ready: true,
+        iframePointerEvents: "none",
+        hitsReaderHost: true,
+      });
+
+    await page.evaluate(() => {
+      const host = document.querySelector(".reader-host") as HTMLElement | null;
+      if (!host) throw new Error("reader host missing");
+      const dispatch = (type: "touchstart" | "touchend", x: number) => {
+        const event = new Event(type, { bubbles: true });
+        const touch = { clientX: x, clientY: 240 };
+        Object.defineProperty(event, "touches", {
+          value: type === "touchend" ? [] : [touch],
+        });
+        Object.defineProperty(event, "changedTouches", { value: [touch] });
+        host.dispatchEvent(event);
+      };
+      dispatch("touchstart", 300);
+      dispatch("touchend", 120);
+    });
+
+    await expect
+      .poll(async () => readReaderLocation(page))
+      .not.toEqual(before);
   });
 
   test("keeps chapter content visible when the window crosses the side-panel breakpoint", async ({

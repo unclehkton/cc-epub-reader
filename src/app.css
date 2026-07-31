@@ -504,6 +504,16 @@ button {
   overflow: hidden;
 }
 
+@media (pointer: coarse) {
+  /* iOS/WebKit keeps touch events inside EPUB.js's sandboxed iframe, where its
+     listener bridge is not dependable. Let the outer reader stage receive the
+     page-turn gesture instead. Image and external-link actions already use
+     parent-document overlays, so their visible controls remain interactive. */
+  .reader-screen--paginated .reader-host iframe {
+    pointer-events: none;
+  }
+}
+
 .reader-host > * {
   width: 100% !important;
   max-width: 100% !important;
@@ -807,6 +817,101 @@ button {
   border-top: 1px solid var(--border);
   display: flex;
   justify-content: center;
+}
+
+.pwa-install-prompt {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: start;
+  margin-top: 1.5rem;
+  padding: 0.9rem;
+  border: 1px solid #86aa9e;
+  border-radius: 0.9rem;
+  background: linear-gradient(135deg, #f1f7f2, var(--paper));
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.pwa-install-prompt__icon {
+  display: grid;
+  width: 2.4rem;
+  height: 2.4rem;
+  place-items: center;
+  border-radius: 0.7rem;
+  background: var(--jade);
+  color: #fff;
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.pwa-install-prompt__copy {
+  min-width: 0;
+}
+
+.pwa-install-prompt__copy h2,
+.pwa-install-prompt__copy p {
+  margin: 0;
+}
+
+.pwa-install-prompt__copy h2 {
+  color: var(--jade-deep);
+  font-size: 1rem;
+}
+
+.pwa-install-prompt__copy p {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.pwa-install-prompt__action {
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.8rem;
+  border: none;
+  border-radius: 0.55rem;
+  background: var(--jade);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pwa-install-prompt__close {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.pwa-install-prompt__action:focus-visible,
+.pwa-install-prompt__close:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+@media (max-width: 23rem) {
+  .pwa-install-prompt {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding-bottom: calc(0.9rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .pwa-install-prompt__close {
+    position: absolute;
+    top: 0.45rem;
+    right: 0.45rem;
+  }
+
+  .pwa-install-prompt__copy {
+    padding-right: 1.8rem;
+  }
 }
 
 .library-licenses-link {

@@ -431,6 +431,10 @@ class ReaderSessionImpl implements ReaderSession {
         if (!this.isCurrent(gen)) return;
         this.discardPendingTransform();
         await this.rebindCurrentChapter({ skipLocationSync: true });
+        if (isAdjacentBoundaryError(error)) {
+          this.emit({ type: "status", status: "idle" });
+          return;
+        }
         this.emit({
           type: "status",
           status: "error",
@@ -2502,6 +2506,11 @@ function resolveTheme(
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return String(error);
+}
+
+/** EPUB.js rejects this exact message when next/prev runs past the book edge. */
+function isAdjacentBoundaryError(error: unknown): boolean {
+  return errorMessage(error).trim().toLowerCase() === "no section found";
 }
 
 function normalizeResume(

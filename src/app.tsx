@@ -20,6 +20,7 @@ import {
   collectBrowserImportSignals,
   formatFileSizeMiB,
 } from "./platform/import-policy";
+import { usePwaInstallPrompt } from "./platform/use-pwa-install-prompt";
 import { ReaderScreen } from "./reader/reader-screen";
 import {
   LatestWinsSettingsRepository,
@@ -395,6 +396,7 @@ class ResilientLibraryRepository implements LibraryRepository {
 export function App() {
   const durableRepository = useMemo(() => new BookRepository(), []);
   const sessionRepository = useMemo(() => new SessionOnlyRepository(), []);
+  const pwaInstallPrompt = usePwaInstallPrompt();
   const settingsRepository = useMemo(
     () => new LatestWinsSettingsRepository(new SettingsRepository()),
     [],
@@ -698,6 +700,7 @@ export function App() {
           sessionOnly={sessionOnly}
           sessionOnlyMessage={sessionOnlyMessage}
           settingsRepository={settingsRepository}
+          pwaInstallPrompt={pwaInstallPrompt}
           onOpenBook={(next) => {
             void handleOpenBook(next);
           }}

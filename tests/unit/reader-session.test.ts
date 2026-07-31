@@ -1428,6 +1428,26 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
+  it("treats EPUB.js no-section responses at a book boundary as an idle no-op", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    events.length = 0;
+
+    const previousPromise = session.goPrevious();
+    await waitFor(() => control.prevCalls.length >= 1, "previous boundary");
+    control.prevCalls[0]!.reject(new Error("No Section Found"));
+
+    await expect(previousPromise).resolves.toBeUndefined();
+    expect(
+      events.some((event) => event.type === "status" && event.status === "error"),
+    ).toBe(false);
+    expect(
+      events.some((event) => event.type === "status" && event.status === "idle"),
+    ).toBe(true);
+    session.destroy();
+  });
+
   it("same-spine next keeps Document bindings and advances chapter page", async () => {
     const control = createControl();
     control.sameSpinePaging = true;

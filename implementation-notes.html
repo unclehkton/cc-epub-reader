@@ -43,6 +43,16 @@
     <li><strong>Verification:</strong> the supplied EPUB advanced with ordinary Mobile Safari clicks through all pages of <code>Preface2.xhtml</code> into <code>Preface3.xhtml</code>; every measured stage was 390px, the next edge stayed at x=346&ndash;390, and no alert appeared. Fresh gates: TypeScript pass; <strong>228/228</strong> Vitest tests; production/PWA build pass; shell <strong>74,706 bytes gzip</strong>; audit <strong>0 vulnerabilities</strong>; Playwright <strong>48/48</strong> across Chromium, WebKit, Mobile Chrome, and Mobile Safari.</li>
   </ul>
 
+  <h2>2026-08-01 mobile install guidance and EPUB page-turn follow-up</h2>
+  <ul>
+    <li><strong>PWA guidance:</strong> the library now shows a normal-flow paper-and-jade card directly above the licence footer only for uninstalled iPhone/iPod and Android browsers. iPhone copy explains Safari Share &rarr; <code>加入主畫面</code>; Android uses Chrome menu guidance until <code>beforeinstallprompt</code> is available, then exposes <code>立即安裝</code> for the native browser prompt. The close control lasts only for the current page session and no install state is stored or sent elsewhere.</li>
+    <li><strong>Installed-PWA guard:</strong> the card is absent for <code>display-mode: standalone</code>, <code>display-mode: fullscreen</code>, and iOS <code>navigator.standalone</code>. It deliberately does not try to programmatically open an iPhone install dialog, which Safari does not provide.</li>
+    <li><strong>Swipe root cause and fix:</strong> iOS/WebKit can retain real touches inside EPUB.js&rsquo;s sandboxed chapter iframe, bypassing the outer reader-stage gesture listener. In paginated coarse-pointer mode the iframe now yields pointer targeting to the existing reader stage; protected image and external-link controls remain available through their parent overlays. Scrolled mode keeps its iframe interaction and vertical scrolling unchanged.</li>
+    <li><strong>Book-edge behavior:</strong> EPUB.js&rsquo;s exact <code>No Section Found</code> response from a next/previous action at the book boundary is now treated as an idle no-op after rebinding the current chapter. Other navigation errors still surface normally.</li>
+    <li><strong>Supplied EPUB verification:</strong> the supplied mixed fixed-layout/reflowable EPUB opened in Mobile Safari, moved from its cover to the next spine item via the reader-stage left-swipe path, and showed no <code>No Section Found</code> error. The existing 390px stage/host/next-edge geometry regression also passed.</li>
+    <li><strong>Fresh verification:</strong> <code>npm run test:run</code> passed <strong>246/246</strong>; <code>npm run check</code>, production/PWA <code>npm run build</code>, and <code>npm run check:bundle</code> passed; initial shell gzip is <strong>76,107 bytes</strong> (budget 153,600). Mobile Chrome and Mobile Safari passed all <strong>16/16</strong> mobile E2E cases (the final two Safari cases were rerun after the 60-second command window).</li>
+  </ul>
+
   <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>
