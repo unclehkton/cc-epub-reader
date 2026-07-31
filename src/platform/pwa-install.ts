@@ -1,4 +1,4 @@
-export type PwaInstallPlatform = "iphone" | "android" | null;
+export type PwaInstallPlatform = "iphone" | "ios-browser" | "android" | null;
 
 export interface PwaInstallEnvironment {
   userAgent: string;
@@ -26,7 +26,15 @@ export function getPwaInstallPlatform(
   ) {
     return null;
   }
-  if (/iphone|ipod/i.test(environment.userAgent)) return "iphone";
+  if (/iphone|ipod/i.test(environment.userAgent)) {
+    // iOS 15 third-party browsers cannot add a site to the Home Screen. Keep
+    // Safari's instruction accurate instead of presenting its share UI in
+    // Chrome/Firefox/embedded web views.
+    if (/crios|fxios|edgios|opios|gsa|fbav|fban|instagram/i.test(environment.userAgent)) {
+      return "ios-browser";
+    }
+    return "iphone";
+  }
   if (/android/i.test(environment.userAgent)) return "android";
   return null;
 }

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { PwaInstallPrompt } from "../../src/library/pwa-install-prompt";
 import type { PwaInstallPromptModel } from "../../src/platform/use-pwa-install-prompt";
+import type { UiLanguage } from "../../src/domain/types";
 
 function makeModel(
   overrides: Partial<PwaInstallPromptModel> = {},
@@ -35,6 +36,21 @@ describe("PwaInstallPrompt", () => {
     );
 
     expect(screen.getByText(/Chrome.*選單/)).toBeTruthy();
+  });
+
+  it("asks non-Safari iPhone browsers to open the library in Safari", () => {
+    render(<PwaInstallPrompt model={makeModel({ platform: "ios-browser" })} />);
+    expect(screen.getByText(/請在 Safari 開啟/)).toBeTruthy();
+  });
+
+  it("uses Simplified Chinese when the library language is simplified", () => {
+    render(
+      <PwaInstallPrompt
+        model={makeModel()}
+        uiLanguage={"zh-Hans" as UiLanguage}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "将书库添加到主屏幕" })).toBeTruthy();
   });
 
   it("opens the Android native prompt and supports session dismissal", async () => {

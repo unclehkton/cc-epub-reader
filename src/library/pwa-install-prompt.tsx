@@ -1,10 +1,16 @@
 import type { PwaInstallPromptModel } from "../platform/use-pwa-install-prompt";
+import type { UiLanguage } from "../domain/types";
+import { t } from "../ui/strings";
 
 export interface PwaInstallPromptProps {
   model: PwaInstallPromptModel;
+  uiLanguage?: UiLanguage;
 }
 
-export function PwaInstallPrompt({ model }: PwaInstallPromptProps) {
+export function PwaInstallPrompt({
+  model,
+  uiLanguage = "zh-Hant",
+}: PwaInstallPromptProps) {
   if (!model.visible || !model.platform) return null;
 
   const isIphone = model.platform === "iphone";
@@ -14,16 +20,17 @@ export function PwaInstallPrompt({ model }: PwaInstallPromptProps) {
         {isIphone ? "⇧" : "⌂"}
       </span>
       <div class="pwa-install-prompt__copy">
-        <h2 id="pwa-install-title">將書庫加入主畫面</h2>
+        <h2 id="pwa-install-title">{t(uiLanguage, "pwaInstallTitle")}</h2>
         {isIphone ? (
           <p>
-            點擊 Safari 分享按鈕 <span aria-hidden="true">⇧</span>，再選擇
-            「加入主畫面」。
+            {t(uiLanguage, "pwaIphoneInstruction")} <span aria-hidden="true">⇧</span>
           </p>
+        ) : model.platform === "ios-browser" ? (
+          <p>{t(uiLanguage, "pwaIosBrowserInstruction")}</p>
         ) : model.canPromptInstall ? (
-          <p>安裝後可從主畫面直接開啟書庫，閱讀更方便。</p>
+          <p>{t(uiLanguage, "pwaAndroidNativeDescription")}</p>
         ) : (
-          <p>請開啟 Chrome 選單，選擇「安裝應用程式」或「加入主畫面」。</p>
+          <p>{t(uiLanguage, "pwaAndroidFallbackInstruction")}</p>
         )}
         {model.platform === "android" && model.canPromptInstall ? (
           <button
@@ -33,14 +40,14 @@ export function PwaInstallPrompt({ model }: PwaInstallPromptProps) {
               void model.promptInstall();
             }}
           >
-            立即安裝
+            {t(uiLanguage, "pwaInstallNow")}
           </button>
         ) : null}
       </div>
       <button
         type="button"
         class="pwa-install-prompt__close touch-target"
-        aria-label="關閉安裝提示"
+        aria-label={t(uiLanguage, "pwaInstallClose")}
         onClick={model.dismiss}
       >
         ×

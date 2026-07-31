@@ -32,6 +32,7 @@ export interface AdaptedSection {
   index?: number;
   document?: Document;
   idref?: string;
+  properties?: string[];
 }
 
 export interface HookLike {

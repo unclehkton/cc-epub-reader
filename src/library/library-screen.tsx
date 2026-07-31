@@ -284,7 +284,9 @@ export function LibraryScreen({
         ))}
       </ul>
 
-      {pwaInstallPrompt ? <PwaInstallPrompt model={pwaInstallPrompt} /> : null}
+      {pwaInstallPrompt ? (
+        <PwaInstallPrompt model={pwaInstallPrompt} uiLanguage={uiLanguage} />
+      ) : null}
 
       <footer class="library-footer">
         <button

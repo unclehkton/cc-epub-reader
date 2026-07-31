@@ -103,4 +103,25 @@ describe("App", () => {
     expect(prompt).toHaveBeenCalledOnce();
     expect(screen.queryByRole("heading", { name: "將書庫加入主畫面" })).toBeNull();
   });
+
+  it("keeps Android fallback guidance after a native install prompt rejects", async () => {
+    setUserAgent("Mozilla/5.0 (Linux; Android 15)");
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({ matches: false })),
+    });
+    render(<App />);
+    const prompt = vi.fn().mockRejectedValue(new Error("prompt blocked"));
+    const event = new Event("beforeinstallprompt", { cancelable: true });
+    Object.assign(event, {
+      prompt,
+      userChoice: Promise.resolve({ outcome: "dismissed" }),
+    });
+    window.dispatchEvent(event);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "立即安裝" }));
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/Chrome.*選單/)).toBeTruthy();
+  });
 });

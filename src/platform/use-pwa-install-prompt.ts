@@ -73,9 +73,12 @@ export function usePwaInstallPrompt(): PwaInstallPromptModel {
     try {
       await deferredEvent.prompt();
       await deferredEvent.userChoice;
-    } finally {
       setDeferredEvent(null);
       setDismissed(true);
+    } catch {
+      // Native prompts can be blocked or rejected. Keep the card visible and
+      // fall back to the browser-menu instruction instead of losing guidance.
+      setDeferredEvent(null);
     }
   }, [deferredEvent]);
 

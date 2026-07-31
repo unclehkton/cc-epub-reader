@@ -111,16 +111,15 @@ test.describe("mobile", () => {
     await page.getByRole("button", { name: "下一頁" }).first().click();
   });
 
-  test("routes paginated iframe touch targets to the reader stage for swipe turns", async ({
+  test("keeps a reflowable paginated iframe hittable on a phone", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await gotoLibrary(page);
-    await importEpub(page, FIXTURE_READER);
-    await waitForBookTitle(page, "閱讀夾具");
-    await openBook(page, "閱讀夾具");
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
 
-    const before = await waitForStableReaderLocation(page);
     await expect
       .poll(() =>
         page.evaluate(() => {
@@ -135,22 +134,46 @@ test.describe("mobile", () => {
           return {
             ready: true,
             iframePointerEvents: getComputedStyle(iframe).pointerEvents,
-            hitsReaderHost: Boolean(hit?.closest(".reader-host")),
+            hitsIframe: hit === iframe,
           };
         }),
       )
       .toEqual({
         ready: true,
-        iframePointerEvents: "none",
-        hitsReaderHost: true,
+        iframePointerEvents: "auto",
+        hitsIframe: true,
       });
+  });
 
-    await page.evaluate(() => {
-      const host = document.querySelector(".reader-host") as HTMLElement | null;
-      if (!host) throw new Error("reader host missing");
+  test("turns a fixed-layout cover from the reader stage without blocking reflow chapters", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_MIXED_LAYOUT);
+    await waitForBookTitle(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+    await openBook(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+
+    const reader = page.getByLabel(/閱讀：/);
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-fixed-layout",
+      "true",
+    );
+    await expect(page.locator(".reader-host iframe")).toHaveCSS(
+      "pointer-events",
+      "none",
+    );
+
+    await page.locator(".reader-host").evaluate((host) => {
       const dispatch = (type: "touchstart" | "touchend", x: number) => {
         const event = new Event(type, { bubbles: true });
-        const touch = { clientX: x, clientY: 240 };
+        const touch = { clientX: x, clientY: 260 };
         Object.defineProperty(event, "touches", {
           value: type === "touchend" ? [] : [touch],
         });
@@ -160,10 +183,20 @@ test.describe("mobile", () => {
       dispatch("touchstart", 300);
       dispatch("touchend", 120);
     });
-
-    await expect
-      .poll(async () => readReaderLocation(page))
-      .not.toEqual(before);
+    await expect(reader).toHaveAttribute("data-spine-index", "1");
+    // The title page is another fixed-layout spine item. Use the normal
+    // control to reach the reflowable navigation document, then verify that
+    // its iframe has native hit testing again.
+    await page.getByRole("button", { name: "下一頁" }).first().click();
+    await expect(reader).toHaveAttribute("data-spine-index", "2");
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-fixed-layout",
+      "false",
+    );
+    await expect(page.locator(".reader-host iframe")).toHaveCSS(
+      "pointer-events",
+      "auto",
+    );
   });
 
   test("keeps chapter content visible when the window crosses the side-panel breakpoint", async ({

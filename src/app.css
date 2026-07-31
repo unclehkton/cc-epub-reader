@@ -504,12 +504,11 @@ button {
   overflow: hidden;
 }
 
+/* Fixed-layout covers have no text selection/footnotes to preserve. On a
+   touch device, route their full-page swipe through the outer reader stage;
+   reflowable chapters retain normal iframe links and selection. */
 @media (pointer: coarse) {
-  /* iOS/WebKit keeps touch events inside EPUB.js's sandboxed iframe, where its
-     listener bridge is not dependable. Let the outer reader stage receive the
-     page-turn gesture instead. Image and external-link actions already use
-     parent-document overlays, so their visible controls remain interactive. */
-  .reader-screen--paginated .reader-host iframe {
+  .reader-screen--paginated .reader-host[data-reader-fixed-layout="true"] iframe {
     pointer-events: none;
   }
 }

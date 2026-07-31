@@ -34,6 +34,7 @@ import {
   type AdaptedLocation,
   type AdaptedNavItem,
   type AdaptedRendition,
+  type AdaptedSection,
   type EpubFactory,
   type RenditionCreateOptions,
 } from "./epub-adapter";
@@ -431,7 +432,7 @@ class ReaderSessionImpl implements ReaderSession {
         if (!this.isCurrent(gen)) return;
         this.discardPendingTransform();
         await this.rebindCurrentChapter({ skipLocationSync: true });
-        if (isAdjacentBoundaryError(error)) {
+        if (isAdjacentBoundaryError(error, direction, this.location)) {
           this.emit({ type: "status", status: "idle" });
           return;
         }
@@ -1316,6 +1317,12 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.transformResult = null;
     }
+    const section = this.location
+      ? this.book?.spine?.get(this.location.spineIndex)
+      : undefined;
+    this.element.dataset.readerFixedLayout = isFixedLayoutSection(section)
+      ? "true"
+      : "false";
     this.clearChapterGestures();
     const materialize = this.makeMaterialize();
     this.transformResult = rebindImageGates(doc, {
@@ -1400,32 +1407,17 @@ class ReaderSessionImpl implements ReaderSession {
   private installChapterGestures(doc: Document): void {
     this.clearChapterGestures();
     let touchStart: { x: number; y: number; time: number } | null = null;
+    let pointerStart: { x: number; y: number; time: number } | null = null;
+    let ignoreTouchUntil = 0;
     let suppressTap = false;
 
-    const onTouchStart = (event: TouchEvent) => {
-      if (event.touches.length !== 1) {
-        touchStart = null;
-        return;
-      }
-      const touch = event.touches[0]!;
-      touchStart = {
-        x: touch.clientX,
-        y: touch.clientY,
-        time: Date.now(),
-      };
-    };
-
-    const onTouchEnd = (event: TouchEvent) => {
-      const start = touchStart;
-      touchStart = null;
-      if (!start || event.changedTouches.length === 0) return;
+    const handleSwipe = (start: { x: number; y: number; time: number }, endX: number, endY: number) => {
       if (this.flow !== "paginated") return;
-      const touch = event.changedTouches[0]!;
       const direction = classifySwipe({
         startX: start.x,
         startY: start.y,
-        endX: touch.clientX,
-        endY: touch.clientY,
+        endX,
+        endY,
         durationMs: Date.now() - start.time,
       });
       if (!direction) return;
@@ -1441,8 +1433,61 @@ class ReaderSessionImpl implements ReaderSession {
       }
     };
 
+    const onTouchStart = (event: TouchEvent) => {
+      if (Date.now() < ignoreTouchUntil) return;
+      if (event.touches.length !== 1) {
+        touchStart = null;
+        return;
+      }
+      const touch = event.touches[0]!;
+      touchStart = {
+        x: touch.clientX,
+        y: touch.clientY,
+        time: Date.now(),
+      };
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      if (Date.now() < ignoreTouchUntil) {
+        touchStart = null;
+        return;
+      }
+      const start = touchStart;
+      touchStart = null;
+      if (!start || event.changedTouches.length === 0) return;
+      const touch = event.changedTouches[0]!;
+      handleSwipe(start, touch.clientX, touch.clientY);
+    };
+
+    // iOS 15+ reliably delivers pointer events inside an EPUB iframe while
+    // preserving native hit testing for links, footnotes, and text selection.
+    const onPointerDown = (event: PointerEvent) => {
+      if (!event.isPrimary || event.pointerType !== "touch") return;
+      pointerStart = {
+        x: event.clientX,
+        y: event.clientY,
+        time: Date.now(),
+      };
+    };
+
+    const onPointerUp = (event: PointerEvent) => {
+      if (!event.isPrimary || event.pointerType !== "touch") return;
+      const start = pointerStart;
+      pointerStart = null;
+      if (!start) return;
+      // Touch compatibility events usually follow pointerup. Do not turn one
+      // physical swipe twice when a browser exposes both event families.
+      ignoreTouchUntil = Date.now() + 750;
+      touchStart = null;
+      handleSwipe(start, event.clientX, event.clientY);
+    };
+
     const onTouchCancel = () => {
       touchStart = null;
+    };
+
+    const onPointerCancel = () => {
+      pointerStart = null;
     };
 
     const onClick = (event: Event) => {
@@ -1462,13 +1507,39 @@ class ReaderSessionImpl implements ReaderSession {
     doc.addEventListener("touchstart", onTouchStart, { passive: true });
     doc.addEventListener("touchend", onTouchEnd, { passive: true });
     doc.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    doc.addEventListener("pointerdown", onPointerDown, { passive: true });
+    doc.addEventListener("pointerup", onPointerUp, { passive: true });
+    doc.addEventListener("pointercancel", onPointerCancel, { passive: true });
     doc.addEventListener("click", onClick);
+
+    // WebKit can keep a sandboxed iframe's event path on its Window rather
+    // than bubbling through the Document. Capture there as well while keeping
+    // the document listener for DOMParser/test and older engines.
+    const chapterWindow = doc.defaultView;
+    chapterWindow?.addEventListener("pointerdown", onPointerDown, {
+      capture: true,
+      passive: true,
+    });
+    chapterWindow?.addEventListener("pointerup", onPointerUp, {
+      capture: true,
+      passive: true,
+    });
+    chapterWindow?.addEventListener("pointercancel", onPointerCancel, {
+      capture: true,
+      passive: true,
+    });
 
     this.chapterGestureDisposer = () => {
       doc.removeEventListener("touchstart", onTouchStart);
       doc.removeEventListener("touchend", onTouchEnd);
       doc.removeEventListener("touchcancel", onTouchCancel);
+      doc.removeEventListener("pointerdown", onPointerDown);
+      doc.removeEventListener("pointerup", onPointerUp);
+      doc.removeEventListener("pointercancel", onPointerCancel);
       doc.removeEventListener("click", onClick);
+      chapterWindow?.removeEventListener("pointerdown", onPointerDown, true);
+      chapterWindow?.removeEventListener("pointerup", onPointerUp, true);
+      chapterWindow?.removeEventListener("pointercancel", onPointerCancel, true);
     };
   }
 
@@ -2508,9 +2579,28 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** EPUB.js preserves the spine rendition property on each section. */
+function isFixedLayoutSection(section: AdaptedSection | null | undefined): boolean {
+  return Boolean(
+    section?.properties?.some(
+      (property) => property.toLowerCase() === "rendition:layout-pre-paginated",
+    ),
+  );
+}
+
 /** EPUB.js rejects this exact message when next/prev runs past the book edge. */
-function isAdjacentBoundaryError(error: unknown): boolean {
-  return errorMessage(error).trim().toLowerCase() === "no section found";
+function isAdjacentBoundaryError(
+  error: unknown,
+  direction: "next" | "prev",
+  location: ReaderLocation | null,
+): boolean {
+  if (errorMessage(error).trim().toLowerCase() !== "no section found") {
+    return false;
+  }
+  if (!location) return false;
+  return direction === "prev"
+    ? location.spineIndex <= 0
+    : location.spineIndex >= location.spineCount - 1;
 }
 
 function normalizeResume(
