@@ -585,6 +585,47 @@ button {
   border: 0;
 }
 
+/* Compact, parent-document controls for EPUB fragment notes. Sandboxed WebKit
+   needs these hit targets, but one full-size overlay per note obscures text. */
+.epub-reference-dock {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1.75rem;
+  max-width: calc(100vw - 1rem);
+  padding: 0.2rem 0.3rem;
+  overflow-x: auto;
+  border: 1px solid var(--reader-border);
+  border-radius: 999px;
+  background: var(--reader-chrome);
+  box-shadow: 0 2px 8px var(--reader-shadow);
+  scrollbar-width: none;
+}
+
+.epub-reference-dock::-webkit-scrollbar {
+  display: none;
+}
+
+.epub-parent-reference-link {
+  flex: 0 0 auto;
+  min-width: 1.75rem;
+  height: 1.75rem;
+  padding: 0 0.45rem;
+  border: 1px solid var(--reader-border);
+  border-radius: 999px;
+  background: var(--reader-surface);
+  color: var(--reader-jade-deep);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.epub-parent-reference-link:focus-visible {
+  outline: 2px solid var(--reader-amber);
+  outline-offset: 2px;
+}
+
 /* TOC drawer / side panel */
 .toc-backdrop,
 .settings-backdrop {

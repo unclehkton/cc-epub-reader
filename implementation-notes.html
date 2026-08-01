@@ -53,6 +53,13 @@
     <li><strong>Fresh verification:</strong> <code>npm run test:run</code> passed <strong>256/256</strong>; <code>npm run check</code>, production/PWA <code>npm run build</code>, and <code>npm run check:bundle</code> passed; initial shell gzip is <strong>77,358 bytes</strong> (budget 153,600). Mobile Chrome and Mobile Safari passed all <strong>20/20</strong> mobile E2E cases, including a reflowable iframe Pointer Event swipe, a non-interactive fixed cover&rsquo;s stage swipe, and a fixed-page book-internal link. The user-supplied EPUB was rerun in Mobile Safari: its cover moved off spine item 0 via a swipe with no <code>No Section Found</code> error.</li>
   </ul>
 
+  <h2>2026-08-01 reader note controls and background reflow follow-up</h2>
+  <ul>
+    <li><strong>Reference notes:</strong> sandboxed WebKit needs parent-document controls for EPUB links, but the previous 44px control was placed over every fragment note and obscured the paragraph. Fragment notes, standard <code>epub:type="noteref"</code> links, and numbered cross-file fragments now share a compact, horizontally scrollable dock at the bottom edge of the reading stage. Other internal and external links retain their full 44px WebKit-safe hit targets.</li>
+    <li><strong>Background reflow:</strong> background and theme changes previously updated EPUB CSS without scheduling EPUB.js&rsquo;s remeasure. WebKit could therefore keep stale paginated column geometry after the settings sheet closed, and only recover on the next page turn. Every appearance change that can trigger that WebKit layout path now coalesces through the existing two-frame <code>rendition.resize()</code> and chapter rebind sequence.</li>
+    <li><strong>Regression coverage:</strong> the unit suite proves that background/theme changes schedule exactly one relayout and that numeric cross-file note fragments use the compact dock. The mobile E2E flow changes the background, closes settings, and verifies a single page column without navigation in Chromium, WebKit, Mobile Chrome, and Mobile Safari.</li>
+  </ul>
+
   <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>

@@ -671,7 +671,7 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
-  it("does not resize for color-only appearance changes", async () => {
+  it("relayouts after background or theme changes so paginated columns remeasure", async () => {
     const control = createControl();
     const { session } = mountSession(control);
     await openAndResolve(session, control);
@@ -686,7 +686,35 @@ describe("ReaderSession generation ownership", () => {
     });
 
     await flushAppearanceRelayout();
-    expect(control.resizeCalls).toHaveLength(0);
+    expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
+
+    session.destroy();
+  });
+
+  it("docks fragment reference links as compact controls instead of covering chapter text", () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    host.appendChild(document.createElement("iframe"));
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><p>正文<a href='notes.xhtml#note-10'>10</a></p></body></html>",
+      "text/html",
+    );
+
+    (
+      session as unknown as {
+        installParentExternalLinks(doc: Document): void;
+      }
+    ).installParentExternalLinks(chapterDoc);
+
+    const dock = document.body.querySelector(".epub-reference-dock");
+    const reference = document.body.querySelector(
+      "button.epub-parent-reference-link",
+    ) as HTMLButtonElement | null;
+    expect(dock).toBeTruthy();
+    expect(reference).toBeTruthy();
+    expect(dock?.contains(reference)).toBe(true);
+    expect(reference?.classList.contains("touch-target")).toBe(false);
+    expect(reference?.style.position).not.toBe("fixed");
 
     session.destroy();
   });

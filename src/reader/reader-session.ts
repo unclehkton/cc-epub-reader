@@ -179,8 +179,8 @@ class ReaderSessionImpl implements ReaderSession {
   private resizeToken = 0;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * rAF coalescing for appearance-driven relayout (font/margin). Ensures
-   * themes CSS injects before epub.js remeasures paginated columns.
+   * rAF coalescing for appearance-driven relayout. Ensures theme CSS injects
+   * before epub.js remeasures paginated columns.
    */
   private appearanceRelayoutRaf: number | null = null;
   /** Bumps on EPUB.js `rendered`; used to reject stale chapter documents. */
@@ -226,12 +226,15 @@ class ReaderSessionImpl implements ReaderSession {
     inFrameButton: HTMLElement;
     button: HTMLButtonElement;
   }> = [];
-  /** Parent overlays for external links (WebKit iframe listeners are unreliable). */
+  /** Parent overlays for EPUB links (WebKit iframe listeners are unreliable). */
   private parentExternalLinks: Array<{
     anchor: Element;
     button: HTMLButtonElement;
     href: string;
+    reference: boolean;
   }> = [];
+  /** One compact dock groups visible fragment references away from chapter text. */
+  private parentReferenceDock: HTMLDivElement | null = null;
   private parentOverlayRepositionTimer: ReturnType<typeof setInterval> | null =
     null;
   private externalLinkDisposer: (() => void) | null = null;
@@ -1001,19 +1004,21 @@ class ReaderSessionImpl implements ReaderSession {
         Math.min(20, Math.round(settings.horizontalMarginPercent ?? 4)),
       ),
     };
-    // Font/family/margin change paginated column metrics; color/theme do not.
-    // Without a resize, epub.js keeps the old column geometry and WebKit can
-    // expose multiple page-columns side-by-side until the next navigation.
-    const metricsChanged =
+    // Font/family/margin alter column metrics. WebKit also needs a remeasure
+    // after background/theme overrides; otherwise it can retain stale columns
+    // until the next page turn.
+    const reflowChanged =
       prev.fontSizePercent !== next.fontSizePercent ||
       prev.fontFamily !== next.fontFamily ||
-      (prev.horizontalMarginPercent ?? 4) !== (next.horizontalMarginPercent ?? 4);
+      (prev.horizontalMarginPercent ?? 4) !== (next.horizontalMarginPercent ?? 4) ||
+      prev.background !== next.background ||
+      prev.theme !== next.theme;
 
     this.appearance = next;
     const rendition = this.rendition;
     if (!rendition?.themes) {
       // Retain settings; schedule relayout once a rendition exists if needed.
-      if (metricsChanged) this.scheduleAppearanceRelayout();
+      if (reflowChanged) this.scheduleAppearanceRelayout();
       return;
     }
 
@@ -1045,7 +1050,7 @@ class ReaderSessionImpl implements ReaderSession {
       // ignore
     }
 
-    if (metricsChanged) {
+    if (reflowChanged) {
       this.scheduleAppearanceRelayout();
     }
   }
@@ -1103,7 +1108,7 @@ class ReaderSessionImpl implements ReaderSession {
   }
 
   /**
-   * After font/margin theme inject, wait two parent frames so theme CSS can
+   * After appearance CSS inject, wait two parent frames so theme CSS can
    * propagate into the chapter iframe before epub.js remeasures columns.
    * Coalesces rapid A+/A− taps into a single resize.
    */
@@ -1670,11 +1675,19 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
+    let hasVisibleReference = false;
     for (const pair of this.parentExternalLinks) {
       try {
         const rect = pair.anchor.getBoundingClientRect();
         if (!this.isIframeLocalRectVisible(rect, iframe)) {
           this.hideParentOverlayButton(pair.button);
+          continue;
+        }
+        if (pair.reference) {
+          pair.button.hidden = false;
+          pair.button.style.visibility = "visible";
+          pair.button.style.pointerEvents = "auto";
+          hasVisibleReference = true;
           continue;
         }
         const left = iframeRect.left + rect.left;
@@ -1687,6 +1700,23 @@ class ReaderSessionImpl implements ReaderSession {
         this.hideParentOverlayButton(pair.button);
       }
     }
+
+    const dock = this.parentReferenceDock;
+    if (!dock) return;
+    if (!hasVisibleReference) {
+      dock.hidden = true;
+      dock.style.visibility = "hidden";
+      dock.style.pointerEvents = "none";
+      return;
+    }
+    // Keep note controls at the bottom edge of the reading stage, where they
+    // stay reachable without covering the paragraph containing the reference.
+    dock.hidden = false;
+    dock.style.left = `${Math.max(8, iframeRect.left + 8)}px`;
+    dock.style.top = `${Math.max(8, iframeRect.bottom - 36)}px`;
+    dock.style.maxWidth = `${Math.max(0, iframeRect.width - 16)}px`;
+    dock.style.visibility = "visible";
+    dock.style.pointerEvents = "auto";
   }
 
   private ensureParentOverlayTimer(): void {
@@ -1736,6 +1766,12 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
     this.parentExternalLinks = [];
+    try {
+      this.parentReferenceDock?.remove();
+    } catch {
+      // ignore
+    }
+    this.parentReferenceDock = null;
     if (this.parentGatePairs.length === 0) {
       this.clearParentOverlaysTimer();
     }
@@ -1793,7 +1829,7 @@ class ReaderSessionImpl implements ReaderSession {
     };
   }
 
-  /** Parent fixed hit-targets over EPUB anchors for sandboxed WebKit frames. */
+  /** Parent hit-targets over EPUB anchors for sandboxed WebKit frames. */
   private installParentExternalLinks(doc: Document): void {
     this.clearParentExternalLinks();
     if (typeof document === "undefined") return;
@@ -1812,24 +1848,33 @@ class ReaderSessionImpl implements ReaderSession {
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) continue;
       const internal = anchor.getAttribute("data-epub-external") !== "1";
+      const reference = internal && isEpubReferenceLink(anchor, href);
       const button = document.createElement("button");
       button.type = "button";
-      button.className = internal
-        ? "epub-parent-internal-link touch-target"
-        : "epub-parent-external-link touch-target";
+      button.className = reference
+        ? "epub-parent-reference-link"
+        : internal
+          ? "epub-parent-internal-link touch-target"
+          : "epub-parent-external-link touch-target";
       button.setAttribute(
         "aria-label",
-        internal ? `前往書內連結：${href}` : `開啟外部連結：${href}`,
+        reference
+          ? `前往參考註釋：${href}`
+          : internal
+            ? `前往書內連結：${href}`
+            : `開啟外部連結：${href}`,
       );
-      button.textContent = anchor.textContent?.trim() || "外部連結";
-      button.style.position = "fixed";
+      button.textContent = anchor.textContent?.trim() || (reference ? "註" : "外部連結");
       // Above parent image gates (z-index 20) so a mis-parked gate cannot steal taps.
       button.style.zIndex = "21";
-      button.style.minWidth = "44px";
-      button.style.minHeight = "44px";
       button.style.pointerEvents = "auto";
       button.style.maxWidth = "16rem";
       button.style.visibility = "hidden";
+      if (!reference) {
+        button.style.position = "fixed";
+        button.style.minWidth = "44px";
+        button.style.minHeight = "44px";
+      }
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1846,8 +1891,12 @@ class ReaderSessionImpl implements ReaderSession {
         }
         this.openExternalHref(href);
       });
-      document.body.appendChild(button);
-      this.parentExternalLinks.push({ anchor, button, href });
+      if (reference) {
+        this.ensureParentReferenceDock().appendChild(button);
+      } else {
+        document.body.appendChild(button);
+      }
+      this.parentExternalLinks.push({ anchor, button, href, reference });
       // Prefer parent control; keep in-frame link for semantics only.
       try {
         (anchor as HTMLElement).style.pointerEvents = "none";
@@ -1859,6 +1908,20 @@ class ReaderSessionImpl implements ReaderSession {
     this.repositionParentOverlays();
     requestAnimationFrame(() => this.repositionParentOverlays());
     this.ensureParentOverlayTimer();
+  }
+
+  private ensureParentReferenceDock(): HTMLDivElement {
+    if (this.parentReferenceDock) return this.parentReferenceDock;
+    const dock = document.createElement("div");
+    dock.className = "epub-reference-dock";
+    dock.setAttribute("aria-label", "本頁參考註釋");
+    dock.style.position = "fixed";
+    dock.style.zIndex = "21";
+    dock.style.visibility = "hidden";
+    dock.style.pointerEvents = "none";
+    document.body.appendChild(dock);
+    this.parentReferenceDock = dock;
+    return dock;
   }
 
   /**
@@ -2650,6 +2713,18 @@ function isSafeEpubInternalHref(href: string): boolean {
   if (lower.startsWith("#")) return true;
   if (lower.startsWith("//")) return false;
   return !/^[a-z][a-z\d+.-]*:/i.test(lower);
+}
+
+/** EPUB note references conventionally use `epub:type=noteref` or numbered fragments. */
+function isEpubReferenceLink(anchor: Element, href: string): boolean {
+  if (href.trim().startsWith("#")) return true;
+  const epubType = anchor.getAttribute("epub:type") || "";
+  if (/(?:^|\s)noteref(?:\s|$)/i.test(epubType)) return true;
+  const label = anchor.textContent?.trim() || "";
+  return (
+    href.includes("#") &&
+    /^[\[\(（]?\s*\d{1,4}[\]\)）]?\s*$/.test(label)
+  );
 }
 
 /** Resolve EPUB-local hrefs from the current spine path before display(). */

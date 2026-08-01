@@ -6,9 +6,11 @@ import {
   bumpFontSize,
   closeReader,
   contentTextIncludes,
+  closeSettings,
   gotoLibrary,
   importEpub,
   openBook,
+  openSettings,
   readPaginatedStageGeometry,
   readReaderLocation,
   setFlow,
@@ -306,6 +308,29 @@ test.describe("mobile", () => {
       afterNext.cfi !== afterFont.cfi ||
         afterNext.percent !== afterFont.percent,
     ).toBe(true);
+  });
+
+  test("background changes remeasure paginated columns before settings close", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    expect((await readPaginatedStageGeometry(page)).singleVisiblePage).toBe(true);
+
+    await openSettings(page);
+    await page.getByRole("radio", { name: "白色" }).click();
+    await closeSettings(page);
+
+    await expect
+      .poll(async () => (await readPaginatedStageGeometry(page)).singleVisiblePage, {
+        timeout: 15_000,
+      })
+      .toBe(true);
   });
 
   test("scrolled flow remains scrollable after host containment CSS", async ({
