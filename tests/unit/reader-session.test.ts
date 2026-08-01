@@ -4,6 +4,7 @@ import {
   createOwnedObjectURL,
   createReaderSession,
   resolveEpubInternalHref,
+  resolveEpubTocHref,
   type ReaderEvent,
   type ReaderLocation,
 } from "../../src/reader/reader-session";
@@ -43,6 +44,14 @@ describe("resolveEpubInternalHref", () => {
     expect(
       resolveEpubInternalHref("../chapter.xhtml#start", "Text/notes/note.xhtml"),
     ).toBe("Text/chapter.xhtml#start");
+  });
+});
+
+describe("resolveEpubTocHref", () => {
+  it("normalizes a nav.xhtml-relative destination before EPUB.js navigation", () => {
+    expect(
+      resolveEpubTocHref("../Text/ch-02.xhtml", "Text/nav.xhtml"),
+    ).toBe("Text/ch-02.xhtml");
   });
 });
 

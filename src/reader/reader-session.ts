@@ -2546,17 +2546,24 @@ function readBookSummary(book: AdaptedBook): BookSummary {
   const meta = book.packaging?.metadata;
   const title = meta?.title?.trim() || "Untitled";
   const creator = meta?.creator?.trim() || undefined;
-  const toc = flattenToc(book.navigation?.toc ?? []);
+  // Navigation item hrefs are relative to nav.xhtml (or toc.ncx), whereas
+  // rendition.display() expects package-relative spine paths.
+  const navigationPath = book.packaging?.navPath || book.packaging?.ncxPath;
+  const toc = flattenToc(book.navigation?.toc ?? [], navigationPath);
   return creator ? { title, creator, toc } : { title, toc };
 }
 
 function flattenToc(
   items: AdaptedNavItem[],
+  navigationPath?: string,
 ): Array<{ label: string; href: string }> {
   const out: Array<{ label: string; href: string }> = [];
   const walk = (list: AdaptedNavItem[]): void => {
     for (const item of list) {
-      out.push({ label: item.label, href: item.href });
+      out.push({
+        label: item.label,
+        href: resolveEpubTocHref(item.href, navigationPath),
+      });
       if (item.subitems && item.subitems.length > 0) {
         walk(item.subitems);
       }
@@ -2760,6 +2767,14 @@ export function resolveEpubInternalHref(
   } catch {
     return null;
   }
+}
+
+/** Normalize navigation-document-relative TOC links for rendition.display(). */
+export function resolveEpubTocHref(
+  href: string,
+  navigationPath?: string,
+): string {
+  return resolveEpubInternalHref(href, navigationPath) ?? href.trim();
 }
 
 /** EPUB.js rejects this exact message when next/prev runs past the book edge. */

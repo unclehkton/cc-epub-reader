@@ -119,6 +119,10 @@ export interface AdaptedBook {
       title?: string;
       creator?: string;
     };
+    /** Package-relative source document for EPUB 3 navigation links. */
+    navPath?: string;
+    /** Package-relative source document for EPUB 2 NCX navigation links. */
+    ncxPath?: string;
   };
   loaded?: {
     metadata?: Promise<{ title?: string; creator?: string }>;
