@@ -140,6 +140,43 @@ test.describe("mobile", () => {
       });
   });
 
+  test("turns a reflowable page from a touch Pointer Event inside its iframe", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    const before = await readReaderLocation(page);
+    const iframe = page.locator(".reader-host iframe");
+    await iframe.evaluate((element) => {
+      element.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: 300,
+          clientY: 260,
+        }),
+      );
+      element.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: 120,
+          clientY: 260,
+        }),
+      );
+    });
+
+    await expect
+      .poll(async () => readReaderLocation(page))
+      .not.toEqual(before);
+  });
+
   test("turns a non-interactive fixed-layout cover without blocking fixed-layout links", async ({
     page,
   }) => {

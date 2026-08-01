@@ -3,6 +3,7 @@ import { ChapterConverter } from "../../src/reader/chapter-converter";
 import {
   createOwnedObjectURL,
   createReaderSession,
+  resolveEpubInternalHref,
   type ReaderEvent,
   type ReaderLocation,
 } from "../../src/reader/reader-session";
@@ -30,6 +31,20 @@ function deferred<T>(): Deferred<T> {
   });
   return { promise, resolve, reject };
 }
+
+describe("resolveEpubInternalHref", () => {
+  it("keeps a fragment on the current spine document", () => {
+    expect(resolveEpubInternalHref("#note-4", "Text/chapter.xhtml")).toBe(
+      "Text/chapter.xhtml#note-4",
+    );
+  });
+
+  it("resolves a nested relative EPUB link before navigation", () => {
+    expect(
+      resolveEpubInternalHref("../chapter.xhtml#start", "Text/notes/note.xhtml"),
+    ).toBe("Text/chapter.xhtml#start");
+  });
+});
 
 function createHook(): HookLike & {
   handlers: Array<(...args: unknown[]) => unknown>;

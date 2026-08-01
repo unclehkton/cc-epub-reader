@@ -1338,9 +1338,10 @@ class ReaderSessionImpl implements ReaderSession {
     // WebKit. Parent-document overlay buttons receive real clicks safely.
     this.installParentImageGates(doc, materialize);
     this.installParentExternalLinks(doc);
-    // Touch/click inside the chapter iframe do not bubble to the parent —
-    // attach gestures on the live chapter document.
-    this.installChapterGestures(doc);
+    // Touch/click inside the chapter iframe do not bubble to the parent.
+    // EPUB.js can expose a pre-serialization document through getContents(),
+    // so explicitly prefer the iframe's current document for gesture events.
+    this.installChapterGestures(readIframeDocument(this.element) ?? doc);
     // Inject package CSS as sanitized <style> via bounded archive reader
     // (never createUrl). Single-flight per Document.
     if (!options?.skipCssInject) {
@@ -1533,6 +1534,16 @@ class ReaderSessionImpl implements ReaderSession {
       capture: true,
       passive: true,
     });
+    // Some WebKit sandbox paths stop at the <iframe> boundary instead of
+    // reaching the chapter Window. The boundary fallback keeps the iframe
+    // itself fully interactive (links and selection are untouched) while
+    // still allowing a touch swipe to turn a paginated page.
+    const iframe = this.element.querySelector("iframe");
+    iframe?.addEventListener("pointerdown", onPointerDown, { passive: true });
+    iframe?.addEventListener("pointerup", onPointerUp, { passive: true });
+    iframe?.addEventListener("pointercancel", onPointerCancel, {
+      passive: true,
+    });
 
     this.chapterGestureDisposer = () => {
       doc.removeEventListener("touchstart", onTouchStart);
@@ -1545,6 +1556,9 @@ class ReaderSessionImpl implements ReaderSession {
       chapterWindow?.removeEventListener("pointerdown", onPointerDown, true);
       chapterWindow?.removeEventListener("pointerup", onPointerUp, true);
       chapterWindow?.removeEventListener("pointercancel", onPointerCancel, true);
+      iframe?.removeEventListener("pointerdown", onPointerDown);
+      iframe?.removeEventListener("pointerup", onPointerUp);
+      iframe?.removeEventListener("pointercancel", onPointerCancel);
     };
   }
 
@@ -1820,7 +1834,12 @@ class ReaderSessionImpl implements ReaderSession {
         event.preventDefault();
         event.stopPropagation();
         if (internal) {
-          void this.display(href).catch(() => {
+          const target = resolveEpubInternalHref(
+            href,
+            this.location?.spineHref,
+          );
+          if (!target) return;
+          void this.display(target).catch(() => {
             // display() already reports a safe, user-visible navigation error.
           });
           return;
@@ -2631,6 +2650,26 @@ function isSafeEpubInternalHref(href: string): boolean {
   if (lower.startsWith("#")) return true;
   if (lower.startsWith("//")) return false;
   return !/^[a-z][a-z\d+.-]*:/i.test(lower);
+}
+
+/** Resolve EPUB-local hrefs from the current spine path before display(). */
+export function resolveEpubInternalHref(
+  href: string,
+  currentSpineHref?: string,
+): string | null {
+  const trimmed = href.trim();
+  if (!isSafeEpubInternalHref(trimmed)) return null;
+  const base = (currentSpineHref || "").replace(/^\/+/, "");
+  if (!base && trimmed.startsWith("#")) return null;
+  try {
+    const resolved = new URL(
+      trimmed,
+      `https://epub.local/${base || "index.xhtml"}`,
+    );
+    return `${resolved.pathname.replace(/^\//, "")}${resolved.search}${resolved.hash}`;
+  } catch {
+    return null;
+  }
 }
 
 /** EPUB.js rejects this exact message when next/prev runs past the book edge. */
