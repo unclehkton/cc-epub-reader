@@ -203,10 +203,6 @@ test.describe("mobile", () => {
       "data-reader-stage-swipe",
       "true",
     );
-    await expect(page.locator(".reader-host iframe")).toHaveCSS(
-      "pointer-events",
-      "none",
-    );
     await page.locator(".reader-host").evaluate((host) => {
       for (const [type, x] of [
         ["touchstart", 300],
@@ -231,6 +227,7 @@ test.describe("mobile", () => {
       "auto",
     );
     await page
+      .locator(".epub-link-dock")
       .getByRole("button", { name: "前往書內連結：chapter.xhtml" })
       .click();
     await expect(reader).toHaveAttribute("data-spine-index", "3");

@@ -706,8 +706,8 @@ describe("ReaderSession generation ownership", () => {
       }
     ).installParentExternalLinks(chapterDoc);
 
-    const dock = document.body.querySelector(".epub-reference-dock");
-    const reference = document.body.querySelector(
+    const dock = host.querySelector(".epub-link-dock");
+    const reference = host.querySelector(
       "button.epub-parent-reference-link",
     ) as HTMLButtonElement | null;
     expect(dock).toBeTruthy();
@@ -715,6 +715,37 @@ describe("ReaderSession generation ownership", () => {
     expect(dock?.contains(reference)).toBe(true);
     expect(reference?.classList.contains("touch-target")).toBe(false);
     expect(reference?.style.position).not.toBe("fixed");
+
+    session.destroy();
+  });
+
+  it("docks chapter navigation links as compact controls so the TOC stays unobstructed", () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    host.appendChild(document.createElement("iframe"));
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><ol><li><a href='Text/chapter.xhtml#section-1'>1.</a></li></ol></body></html>",
+      "text/html",
+    );
+
+    (
+      session as unknown as {
+        installParentExternalLinks(doc: Document): void;
+      }
+    ).installParentExternalLinks(chapterDoc);
+
+    const dock = host.querySelector(".epub-link-dock");
+    const chapterLink = host.querySelector(
+      "button.epub-parent-internal-link",
+    ) as HTMLButtonElement | null;
+    expect(dock).toBeTruthy();
+    expect(chapterLink).toBeTruthy();
+    expect(dock?.contains(chapterLink)).toBe(true);
+    expect(chapterLink?.classList.contains("touch-target")).toBe(false);
+    expect(chapterLink?.style.position).not.toBe("fixed");
+    expect(chapterDoc.querySelector("a")?.getAttribute("style") || "").toMatch(
+      /pointer-events:\s*none/i,
+    );
 
     session.destroy();
   });

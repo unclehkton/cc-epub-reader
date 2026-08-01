@@ -231,10 +231,11 @@ class ReaderSessionImpl implements ReaderSession {
     anchor: Element;
     button: HTMLButtonElement;
     href: string;
+    internal: boolean;
     reference: boolean;
   }> = [];
-  /** One compact dock groups visible fragment references away from chapter text. */
-  private parentReferenceDock: HTMLDivElement | null = null;
+  /** One compact dock groups visible EPUB-local links away from chapter text. */
+  private parentInternalLinkDock: HTMLDivElement | null = null;
   private parentOverlayRepositionTimer: ReturnType<typeof setInterval> | null =
     null;
   private externalLinkDisposer: (() => void) | null = null;
@@ -1675,7 +1676,7 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
-    let hasVisibleReference = false;
+    let hasVisibleInternalLink = false;
     for (const pair of this.parentExternalLinks) {
       try {
         const rect = pair.anchor.getBoundingClientRect();
@@ -1683,11 +1684,11 @@ class ReaderSessionImpl implements ReaderSession {
           this.hideParentOverlayButton(pair.button);
           continue;
         }
-        if (pair.reference) {
+        if (pair.internal) {
           pair.button.hidden = false;
           pair.button.style.visibility = "visible";
           pair.button.style.pointerEvents = "auto";
-          hasVisibleReference = true;
+          hasVisibleInternalLink = true;
           continue;
         }
         const left = iframeRect.left + rect.left;
@@ -1701,9 +1702,9 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
-    const dock = this.parentReferenceDock;
+    const dock = this.parentInternalLinkDock;
     if (!dock) return;
-    if (!hasVisibleReference) {
+    if (!hasVisibleInternalLink) {
       dock.hidden = true;
       dock.style.visibility = "hidden";
       dock.style.pointerEvents = "none";
@@ -1767,11 +1768,11 @@ class ReaderSessionImpl implements ReaderSession {
     }
     this.parentExternalLinks = [];
     try {
-      this.parentReferenceDock?.remove();
+      this.parentInternalLinkDock?.remove();
     } catch {
       // ignore
     }
-    this.parentReferenceDock = null;
+    this.parentInternalLinkDock = null;
     if (this.parentGatePairs.length === 0) {
       this.clearParentOverlaysTimer();
     }
@@ -1815,17 +1816,28 @@ class ReaderSessionImpl implements ReaderSession {
     const onClick = (event: Event): void => {
       const target = eventTargetElement(event.target);
       if (!target) return;
-      const anchor = closestElement(target, "a[data-epub-external='1']");
+      const anchor = closestElement(target, "a[href]");
       if (!anchor) return;
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) return;
       event.preventDefault();
       event.stopPropagation();
-      this.openExternalHref(href);
+      if (anchor.getAttribute("data-epub-external") === "1") {
+        this.openExternalHref(href);
+        return;
+      }
+      if (!isSafeEpubInternalHref(href)) return;
+      const destination = resolveEpubInternalHref(href, this.location?.spineHref);
+      if (!destination) return;
+      void this.display(destination).catch(() => {
+        // display() already reports a safe, user-visible navigation error.
+      });
     };
-    doc.addEventListener("click", onClick, true);
+    // Let EPUB/content link handlers run first, then normalize navigation at
+    // the document bubble boundary before the iframe follows the raw href.
+    doc.addEventListener("click", onClick);
     this.externalLinkDisposer = () => {
-      doc.removeEventListener("click", onClick, true);
+      doc.removeEventListener("click", onClick);
     };
   }
 
@@ -1836,14 +1848,16 @@ class ReaderSessionImpl implements ReaderSession {
     const iframe = this.element.querySelector("iframe");
     if (!iframe) return;
 
-    const anchors = Array.from(doc.querySelectorAll("a[href]")).filter((anchor) => {
-      const href = (anchor.getAttribute("href") || "").trim();
-      return (
-        Boolean(href) &&
-        (anchor.getAttribute("data-epub-external") === "1" ||
-          isSafeEpubInternalHref(href))
-      );
-    });
+    const anchors = Array.from(doc.querySelectorAll("a[href]")).filter(
+      (anchor) => {
+        const href = (anchor.getAttribute("href") || "").trim();
+        return (
+          Boolean(href) &&
+          (anchor.getAttribute("data-epub-external") === "1" ||
+            isSafeEpubInternalHref(href))
+        );
+      },
+    );
     for (const anchor of anchors) {
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) continue;
@@ -1854,7 +1868,7 @@ class ReaderSessionImpl implements ReaderSession {
       button.className = reference
         ? "epub-parent-reference-link"
         : internal
-          ? "epub-parent-internal-link touch-target"
+          ? "epub-parent-internal-link"
           : "epub-parent-external-link touch-target";
       button.setAttribute(
         "aria-label",
@@ -1870,7 +1884,7 @@ class ReaderSessionImpl implements ReaderSession {
       button.style.pointerEvents = "auto";
       button.style.maxWidth = "16rem";
       button.style.visibility = "hidden";
-      if (!reference) {
+      if (!internal) {
         button.style.position = "fixed";
         button.style.minWidth = "44px";
         button.style.minHeight = "44px";
@@ -1891,12 +1905,12 @@ class ReaderSessionImpl implements ReaderSession {
         }
         this.openExternalHref(href);
       });
-      if (reference) {
-        this.ensureParentReferenceDock().appendChild(button);
+      if (internal) {
+        this.ensureParentInternalLinkDock().appendChild(button);
       } else {
-        document.body.appendChild(button);
+        this.element.appendChild(button);
       }
-      this.parentExternalLinks.push({ anchor, button, href, reference });
+      this.parentExternalLinks.push({ anchor, button, href, internal, reference });
       // Prefer parent control; keep in-frame link for semantics only.
       try {
         (anchor as HTMLElement).style.pointerEvents = "none";
@@ -1910,17 +1924,17 @@ class ReaderSessionImpl implements ReaderSession {
     this.ensureParentOverlayTimer();
   }
 
-  private ensureParentReferenceDock(): HTMLDivElement {
-    if (this.parentReferenceDock) return this.parentReferenceDock;
+  private ensureParentInternalLinkDock(): HTMLDivElement {
+    if (this.parentInternalLinkDock) return this.parentInternalLinkDock;
     const dock = document.createElement("div");
-    dock.className = "epub-reference-dock";
-    dock.setAttribute("aria-label", "本頁參考註釋");
+    dock.className = "epub-link-dock";
+    dock.setAttribute("aria-label", "本頁書內連結");
     dock.style.position = "fixed";
     dock.style.zIndex = "21";
     dock.style.visibility = "hidden";
     dock.style.pointerEvents = "none";
-    document.body.appendChild(dock);
-    this.parentReferenceDock = dock;
+    this.element.appendChild(dock);
+    this.parentInternalLinkDock = dock;
     return dock;
   }
 
@@ -2049,7 +2063,7 @@ class ReaderSessionImpl implements ReaderSession {
           if (idx >= 0) this.parentGatePairs.splice(idx, 1);
         })();
       });
-      document.body.appendChild(button);
+      this.element.appendChild(button);
       this.parentGatePairs.push(pair);
     }
     this.repositionParentOverlays();
@@ -2715,15 +2729,16 @@ function isSafeEpubInternalHref(href: string): boolean {
   return !/^[a-z][a-z\d+.-]*:/i.test(lower);
 }
 
-/** EPUB note references conventionally use `epub:type=noteref` or numbered fragments. */
+/** EPUB note references conventionally use `epub:type=noteref` or a numbered note fragment. */
 function isEpubReferenceLink(anchor: Element, href: string): boolean {
-  if (href.trim().startsWith("#")) return true;
+  if (!href.includes("#")) return false;
   const epubType = anchor.getAttribute("epub:type") || "";
   if (/(?:^|\s)noteref(?:\s|$)/i.test(epubType)) return true;
   const label = anchor.textContent?.trim() || "";
+  const fragment = href.slice(href.indexOf("#") + 1);
   return (
-    href.includes("#") &&
-    /^[\[\(（]?\s*\d{1,4}[\]\)）]?\s*$/.test(label)
+    /^[\[\(（]?\s*\d{1,4}[\]\)）]?\s*$/.test(label) &&
+    /(?:note|footnote|endnote|noteref|fn|ref)/i.test(fragment)
   );
 }
 

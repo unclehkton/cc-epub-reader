@@ -519,6 +519,14 @@ button {
   height: 100% !important;
 }
 
+/* EPUB.js mounts a full-size iframe, while the parent link dock is deliberately
+   a compact reading control. Do not inherit the iframe sizing rule. */
+.reader-host > .epub-link-dock {
+  width: auto !important;
+  max-width: calc(100vw - 1rem) !important;
+  height: auto !important;
+}
+
 .reader-host iframe {
   max-width: 100% !important;
 }
@@ -585,9 +593,9 @@ button {
   border: 0;
 }
 
-/* Compact, parent-document controls for EPUB fragment notes. Sandboxed WebKit
-   needs these hit targets, but one full-size overlay per note obscures text. */
-.epub-reference-dock {
+/* Compact parent-document controls for EPUB-local links. Sandboxed WebKit
+   needs these hit targets, but one full-size overlay per link obscures text. */
+.epub-link-dock {
   display: flex;
   align-items: center;
   gap: 0.3rem;
@@ -602,11 +610,12 @@ button {
   scrollbar-width: none;
 }
 
-.epub-reference-dock::-webkit-scrollbar {
+.epub-link-dock::-webkit-scrollbar {
   display: none;
 }
 
-.epub-parent-reference-link {
+.epub-parent-reference-link,
+.epub-parent-internal-link {
   flex: 0 0 auto;
   min-width: 1.75rem;
   height: 1.75rem;
@@ -621,7 +630,8 @@ button {
   line-height: 1;
 }
 
-.epub-parent-reference-link:focus-visible {
+.epub-parent-reference-link:focus-visible,
+.epub-parent-internal-link:focus-visible {
   outline: 2px solid var(--reader-amber);
   outline-offset: 2px;
 }
