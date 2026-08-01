@@ -6,9 +6,11 @@ import {
   bumpFontSize,
   closeReader,
   contentTextIncludes,
+  closeSettings,
   gotoLibrary,
   importEpub,
   openBook,
+  openSettings,
   readPaginatedStageGeometry,
   readReaderLocation,
   setFlow,
@@ -17,6 +19,56 @@ import {
 } from "./helpers";
 
 test.describe("mobile", () => {
+  test("shows uninstalled-phone home-screen guidance without blocking import", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      !testInfo.project.name.startsWith("Mobile "),
+      "Home-screen guidance is intentionally limited to iPhone and Android browsers.",
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+
+    await expect(
+      page.getByRole("heading", { name: "將書庫加入主畫面" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "匯入 EPUB" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "關閉安裝提示" })).toBeVisible();
+
+    const userAgent = await page.evaluate(() => navigator.userAgent);
+    if (/iphone|ipod/i.test(userAgent)) {
+      await expect(page.getByText(/Safari 分享按鈕/)).toBeVisible();
+    } else {
+      await expect(page.getByText(/Chrome.*選單/)).toBeVisible();
+    }
+  });
+
+  test("hides home-screen guidance in standalone display mode", async ({ page }) => {
+    await page.addInitScript(() => {
+      const originalMatchMedia = window.matchMedia.bind(window);
+      window.matchMedia = (query: string) => {
+        if (query === "(display-mode: standalone)") {
+          return {
+            matches: true,
+            media: query,
+            onchange: null,
+            addEventListener: () => undefined,
+            removeEventListener: () => undefined,
+            addListener: () => undefined,
+            removeListener: () => undefined,
+            dispatchEvent: () => false,
+          } as MediaQueryList;
+        }
+        return originalMatchMedia(query);
+      };
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await expect(
+      page.getByRole("heading", { name: "將書庫加入主畫面" }),
+    ).toBeHidden();
+  });
+
   test("keeps long paginated chapters and both page edges inside the phone viewport", async ({
     page,
   }) => {
@@ -63,6 +115,134 @@ test.describe("mobile", () => {
       });
 
     await page.getByRole("button", { name: "下一頁" }).first().click();
+  });
+
+  test("does not disable pointer input for a reflowable paginated page", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const host = document.querySelector(".reader-host") as HTMLElement | null;
+          const iframe = host?.querySelector("iframe");
+          if (!host || !iframe) return { ready: false };
+          return {
+            ready: true,
+            iframePointerEvents: getComputedStyle(iframe).pointerEvents,
+            stageSwipe: host.dataset.readerStageSwipe,
+          };
+        }),
+      )
+      .toEqual({
+        ready: true,
+        iframePointerEvents: "auto",
+        stageSwipe: "false",
+      });
+  });
+
+  test("turns a reflowable page from a touch Pointer Event inside its iframe", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    const before = await readReaderLocation(page);
+    const iframe = page.locator(".reader-host iframe");
+    await iframe.evaluate((element) => {
+      element.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: 300,
+          clientY: 260,
+        }),
+      );
+      element.dispatchEvent(
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          pointerType: "touch",
+          isPrimary: true,
+          clientX: 120,
+          clientY: 260,
+        }),
+      );
+    });
+
+    await expect
+      .poll(async () => readReaderLocation(page))
+      .not.toEqual(before);
+  });
+
+  test("turns a non-interactive fixed-layout cover without blocking fixed-layout links", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_MIXED_LAYOUT);
+    await waitForBookTitle(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+    await openBook(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+
+    const reader = page.getByLabel(/閱讀：/);
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-fixed-layout",
+      "true",
+    );
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-stage-swipe",
+      "true",
+    );
+    await page.locator(".reader-host").evaluate((host) => {
+      for (const [type, x] of [
+        ["touchstart", 300],
+        ["touchend", 120],
+      ] as const) {
+        const event = new Event(type, { bubbles: true });
+        const touch = { clientX: x, clientY: 260 };
+        Object.defineProperty(event, "touches", {
+          value: type === "touchend" ? [] : [touch],
+        });
+        Object.defineProperty(event, "changedTouches", { value: [touch] });
+        host.dispatchEvent(event);
+      }
+    });
+    await expect(reader).toHaveAttribute("data-spine-index", "1");
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-fixed-layout",
+      "true",
+    );
+    await expect(page.locator(".reader-host iframe")).toHaveCSS(
+      "pointer-events",
+      "auto",
+    );
+    await page
+      .locator(".epub-link-dock")
+      .getByRole("button", { name: "前往書內連結：chapter.xhtml" })
+      .click();
+    await expect(reader).toHaveAttribute("data-spine-index", "3");
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-fixed-layout",
+      "false",
+    );
+    await expect(page.locator(".reader-host iframe")).toHaveCSS(
+      "pointer-events",
+      "auto",
+    );
   });
 
   test("keeps chapter content visible when the window crosses the side-panel breakpoint", async ({
@@ -129,6 +309,29 @@ test.describe("mobile", () => {
       afterNext.cfi !== afterFont.cfi ||
         afterNext.percent !== afterFont.percent,
     ).toBe(true);
+  });
+
+  test("background changes remeasure paginated columns before settings close", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_LARGE);
+    await waitForBookTitle(page, "長章節壓力夾具");
+    await openBook(page, "長章節壓力夾具");
+
+    expect((await readPaginatedStageGeometry(page)).singleVisiblePage).toBe(true);
+
+    await openSettings(page);
+    await page.getByRole("radio", { name: "白色" }).click();
+    await closeSettings(page);
+
+    await expect
+      .poll(async () => (await readPaginatedStageGeometry(page)).singleVisiblePage, {
+        timeout: 15_000,
+      })
+      .toBe(true);
   });
 
   test("scrolled flow remains scrollable after host containment CSS", async ({

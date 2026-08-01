@@ -3,6 +3,8 @@ import { ChapterConverter } from "../../src/reader/chapter-converter";
 import {
   createOwnedObjectURL,
   createReaderSession,
+  resolveEpubInternalHref,
+  resolveEpubTocHref,
   type ReaderEvent,
   type ReaderLocation,
 } from "../../src/reader/reader-session";
@@ -30,6 +32,28 @@ function deferred<T>(): Deferred<T> {
   });
   return { promise, resolve, reject };
 }
+
+describe("resolveEpubInternalHref", () => {
+  it("keeps a fragment on the current spine document", () => {
+    expect(resolveEpubInternalHref("#note-4", "Text/chapter.xhtml")).toBe(
+      "Text/chapter.xhtml#note-4",
+    );
+  });
+
+  it("resolves a nested relative EPUB link before navigation", () => {
+    expect(
+      resolveEpubInternalHref("../chapter.xhtml#start", "Text/notes/note.xhtml"),
+    ).toBe("Text/chapter.xhtml#start");
+  });
+});
+
+describe("resolveEpubTocHref", () => {
+  it("normalizes a nav.xhtml-relative destination before EPUB.js navigation", () => {
+    expect(
+      resolveEpubTocHref("../Text/ch-02.xhtml", "Text/nav.xhtml"),
+    ).toBe("Text/ch-02.xhtml");
+  });
+});
 
 function createHook(): HookLike & {
   handlers: Array<(...args: unknown[]) => unknown>;
@@ -656,7 +680,7 @@ describe("ReaderSession generation ownership", () => {
     session.destroy();
   });
 
-  it("does not resize for color-only appearance changes", async () => {
+  it("relayouts after background or theme changes so paginated columns remeasure", async () => {
     const control = createControl();
     const { session } = mountSession(control);
     await openAndResolve(session, control);
@@ -671,7 +695,66 @@ describe("ReaderSession generation ownership", () => {
     });
 
     await flushAppearanceRelayout();
-    expect(control.resizeCalls).toHaveLength(0);
+    expect(control.resizeCalls).toEqual([{ width: undefined, height: undefined }]);
+
+    session.destroy();
+  });
+
+  it("docks fragment reference links as compact controls instead of covering chapter text", () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    host.appendChild(document.createElement("iframe"));
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><p>正文<a href='notes.xhtml#note-10'>10</a></p></body></html>",
+      "text/html",
+    );
+
+    (
+      session as unknown as {
+        installParentExternalLinks(doc: Document): void;
+      }
+    ).installParentExternalLinks(chapterDoc);
+
+    const dock = host.querySelector(".epub-link-dock");
+    const reference = host.querySelector(
+      "button.epub-parent-reference-link",
+    ) as HTMLButtonElement | null;
+    expect(dock).toBeTruthy();
+    expect(reference).toBeTruthy();
+    expect(dock?.contains(reference)).toBe(true);
+    expect(reference?.classList.contains("touch-target")).toBe(false);
+    expect(reference?.style.position).not.toBe("fixed");
+
+    session.destroy();
+  });
+
+  it("docks chapter navigation links as compact controls so the TOC stays unobstructed", () => {
+    const control = createControl();
+    const { session } = mountSession(control);
+    host.appendChild(document.createElement("iframe"));
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><ol><li><a href='Text/chapter.xhtml#section-1'>1.</a></li></ol></body></html>",
+      "text/html",
+    );
+
+    (
+      session as unknown as {
+        installParentExternalLinks(doc: Document): void;
+      }
+    ).installParentExternalLinks(chapterDoc);
+
+    const dock = host.querySelector(".epub-link-dock");
+    const chapterLink = host.querySelector(
+      "button.epub-parent-internal-link",
+    ) as HTMLButtonElement | null;
+    expect(dock).toBeTruthy();
+    expect(chapterLink).toBeTruthy();
+    expect(dock?.contains(chapterLink)).toBe(true);
+    expect(chapterLink?.classList.contains("touch-target")).toBe(false);
+    expect(chapterLink?.style.position).not.toBe("fixed");
+    expect(chapterDoc.querySelector("a")?.getAttribute("style") || "").toMatch(
+      /pointer-events:\s*none/i,
+    );
 
     session.destroy();
   });
@@ -1425,6 +1508,106 @@ describe("ReaderSession generation ownership", () => {
       events.some((e) => e.type === "status" && e.status === "idle"),
     ).toBe(true);
 
+    session.destroy();
+  });
+
+  it("treats EPUB.js no-section responses at a book boundary as an idle no-op", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    events.length = 0;
+
+    const previousPromise = session.goPrevious();
+    await waitFor(() => control.prevCalls.length >= 1, "previous boundary");
+    control.prevCalls[0]!.reject(new Error("No Section Found"));
+
+    await expect(previousPromise).resolves.toBeUndefined();
+    expect(
+      events.some((event) => event.type === "status" && event.status === "error"),
+    ).toBe(false);
+    expect(
+      events.some((event) => event.type === "status" && event.status === "idle"),
+    ).toBe(true);
+    session.destroy();
+  });
+
+  it("keeps a no-section error visible when previous fails mid-book", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    control.setLocation({
+      cfi: "epubcfi(/6/4[ch2.xhtml]!/4/2/2)",
+      href: "ch2.xhtml",
+      index: 1,
+    });
+    control.emit("relocated", control.location);
+    events.length = 0;
+
+    const previousPromise = session.goPrevious();
+    await waitFor(() => control.prevCalls.length >= 1, "mid-book previous");
+    control.prevCalls[0]!.reject(new Error("No Section Found"));
+
+    await expect(previousPromise).rejects.toThrow("No Section Found");
+    expect(
+      events.some((event) => event.type === "status" && event.status === "error"),
+    ).toBe(true);
+    session.destroy();
+  });
+
+  it("treats a no-section response at the final spine item as a next-page no-op", async () => {
+    const control = createControl();
+    const { session, events } = mountSession(control);
+    await openAndResolve(session, control);
+    control.setLocation({
+      cfi: "epubcfi(/6/4[ch3.xhtml]!/4/2/2)",
+      href: "ch3.xhtml",
+      index: 2,
+    });
+    control.emit("relocated", control.location);
+    events.length = 0;
+
+    const nextPromise = session.goNext();
+    await waitFor(() => control.nextCalls.length >= 1, "next boundary");
+    control.nextCalls[0]!.reject(new Error("No Section Found"));
+
+    await expect(nextPromise).resolves.toBeUndefined();
+    expect(
+      events.some((event) => event.type === "status" && event.status === "error"),
+    ).toBe(false);
+    session.destroy();
+  });
+
+  it("turns a paginated chapter from its in-frame touch pointer without blocking links", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      "<html><body><a href='#note'>註腳</a><p>章節文字</p></body></html>",
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    await openAndResolve(session, control);
+
+    const dispatch = (type: "pointerdown" | "pointerup", x: number) => {
+      const event = new Event(type, { bubbles: true });
+      Object.defineProperties(event, {
+        clientX: { value: x },
+        clientY: { value: 240 },
+        isPrimary: { value: true },
+        pointerType: { value: "touch" },
+      });
+      chapterDoc.body?.dispatchEvent(event);
+    };
+    dispatch("pointerdown", 300);
+    dispatch("pointerup", 120);
+
+    await waitFor(() => control.nextCalls.length >= 1, "in-frame pointer next");
+    control.nextCalls[0]!.resolve();
+    await Promise.resolve();
+    const link = chapterDoc.querySelector("a");
+    const onLinkClick = vi.fn();
+    link?.addEventListener("click", onLinkClick);
+    (link as HTMLAnchorElement | null)?.click();
+    expect(onLinkClick).toHaveBeenCalledOnce();
     session.destroy();
   });
 

@@ -504,10 +504,27 @@ button {
   overflow: hidden;
 }
 
+/* EPUB.js sandboxed documents can keep touch events inside the iframe. Route
+   only non-interactive fixed-layout pages through the reader stage; pages
+   with links or controls retain native iframe hit testing. */
+@media (pointer: coarse) {
+  .reader-screen--paginated .reader-host[data-reader-stage-swipe="true"] iframe {
+    pointer-events: none;
+  }
+}
+
 .reader-host > * {
   width: 100% !important;
   max-width: 100% !important;
   height: 100% !important;
+}
+
+/* EPUB.js mounts a full-size iframe, while the parent link dock is deliberately
+   a compact reading control. Do not inherit the iframe sizing rule. */
+.reader-host > .epub-link-dock {
+  width: auto !important;
+  max-width: calc(100vw - 1rem) !important;
+  height: auto !important;
 }
 
 .reader-host iframe {
@@ -574,6 +591,51 @@ button {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* Compact parent-document controls for EPUB-local links. Sandboxed WebKit
+   needs these hit targets, but one full-size overlay per link obscures text. */
+.epub-link-dock {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1.75rem;
+  max-width: calc(100vw - 1rem);
+  padding: 0.2rem 0.3rem;
+  overflow-x: auto;
+  border: 1px solid var(--reader-border);
+  border-radius: 999px;
+  background: var(--reader-chrome);
+  box-shadow: 0 2px 8px var(--reader-shadow);
+  scrollbar-width: none;
+}
+
+.epub-link-dock::-webkit-scrollbar {
+  display: none;
+}
+
+.epub-parent-reference-link,
+.epub-parent-internal-link,
+.epub-parent-external-link {
+  flex: 0 0 auto;
+  min-width: 1.75rem;
+  height: 1.75rem;
+  padding: 0 0.45rem;
+  border: 1px solid var(--reader-border);
+  border-radius: 999px;
+  background: var(--reader-surface);
+  color: var(--reader-jade-deep);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.epub-parent-reference-link:focus-visible,
+.epub-parent-internal-link:focus-visible,
+.epub-parent-external-link:focus-visible {
+  outline: 2px solid var(--reader-amber);
+  outline-offset: 2px;
 }
 
 /* TOC drawer / side panel */
@@ -807,6 +869,101 @@ button {
   border-top: 1px solid var(--border);
   display: flex;
   justify-content: center;
+}
+
+.pwa-install-prompt {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: start;
+  margin-top: 1.5rem;
+  padding: 0.9rem;
+  border: 1px solid #86aa9e;
+  border-radius: 0.9rem;
+  background: linear-gradient(135deg, #f1f7f2, var(--paper));
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.pwa-install-prompt__icon {
+  display: grid;
+  width: 2.4rem;
+  height: 2.4rem;
+  place-items: center;
+  border-radius: 0.7rem;
+  background: var(--jade);
+  color: #fff;
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.pwa-install-prompt__copy {
+  min-width: 0;
+}
+
+.pwa-install-prompt__copy h2,
+.pwa-install-prompt__copy p {
+  margin: 0;
+}
+
+.pwa-install-prompt__copy h2 {
+  color: var(--jade-deep);
+  font-size: 1rem;
+}
+
+.pwa-install-prompt__copy p {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.pwa-install-prompt__action {
+  margin-top: 0.65rem;
+  padding: 0.5rem 0.8rem;
+  border: none;
+  border-radius: 0.55rem;
+  background: var(--jade);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pwa-install-prompt__close {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.pwa-install-prompt__action:focus-visible,
+.pwa-install-prompt__close:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+@media (max-width: 23rem) {
+  .pwa-install-prompt {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding-bottom: calc(0.9rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .pwa-install-prompt__close {
+    position: absolute;
+    top: 0.45rem;
+    right: 0.45rem;
+  }
+
+  .pwa-install-prompt__copy {
+    padding-right: 1.8rem;
+  }
 }
 
 .library-licenses-link {

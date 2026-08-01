@@ -38,7 +38,14 @@ export type UiStringKey =
   | "langSimplified"
   | "backToLibrary"
   | "converting"
-  | "sessionOnlyDefault";
+  | "sessionOnlyDefault"
+  | "pwaInstallTitle"
+  | "pwaInstallClose"
+  | "pwaIphoneInstruction"
+  | "pwaIosBrowserInstruction"
+  | "pwaAndroidNativeDescription"
+  | "pwaAndroidFallbackInstruction"
+  | "pwaInstallNow";
 
 const HANT: Record<UiStringKey, string> = {
   libraryTitle: "你的書庫",
@@ -75,6 +82,14 @@ const HANT: Record<UiStringKey, string> = {
   converting: "轉換中…",
   sessionOnlyDefault:
     "目前無法使用持久儲存，書籍與進度只會保留在這個瀏覽階段，重新載入後會消失。",
+  pwaInstallTitle: "將書庫加入主畫面",
+  pwaInstallClose: "關閉安裝提示",
+  pwaIphoneInstruction: "點擊 Safari 分享按鈕，再選擇「加入主畫面」。",
+  pwaIosBrowserInstruction: "請在 Safari 開啟此書庫，再從分享按鈕選擇「加入主畫面」。",
+  pwaAndroidNativeDescription: "安裝後可從主畫面直接開啟書庫，閱讀更方便。",
+  pwaAndroidFallbackInstruction:
+    "請開啟 Chrome 選單，選擇「安裝應用程式」或「加入主畫面」。",
+  pwaInstallNow: "立即安裝",
 };
 
 const HANS: Record<UiStringKey, string> = {
@@ -112,6 +127,14 @@ const HANS: Record<UiStringKey, string> = {
   converting: "转换中…",
   sessionOnlyDefault:
     "目前无法使用持久存储，书籍与进度只会保留在这个浏览阶段，重新加载后会消失。",
+  pwaInstallTitle: "将书库添加到主屏幕",
+  pwaInstallClose: "关闭安装提示",
+  pwaIphoneInstruction: "点按 Safari 分享按钮，再选择“添加到主屏幕”。",
+  pwaIosBrowserInstruction: "请在 Safari 打开此书库，再从分享按钮选择“添加到主屏幕”。",
+  pwaAndroidNativeDescription: "安装后可从主屏幕直接打开书库，阅读更方便。",
+  pwaAndroidFallbackInstruction:
+    "请打开 Chrome 菜单，选择“安装应用”或“添加到主屏幕”。",
+  pwaInstallNow: "立即安装",
 };
 
 export function t(lang: UiLanguage | undefined, key: UiStringKey): string {
