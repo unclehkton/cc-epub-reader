@@ -111,7 +111,7 @@ test.describe("mobile", () => {
     await page.getByRole("button", { name: "下一頁" }).first().click();
   });
 
-  test("keeps a reflowable paginated iframe hittable on a phone", async ({
+  test("does not disable pointer input for a reflowable paginated page", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -126,26 +126,21 @@ test.describe("mobile", () => {
           const host = document.querySelector(".reader-host") as HTMLElement | null;
           const iframe = host?.querySelector("iframe");
           if (!host || !iframe) return { ready: false };
-          const rect = host.getBoundingClientRect();
-          const hit = document.elementFromPoint(
-            rect.left + rect.width / 2,
-            rect.top + rect.height / 2,
-          );
           return {
             ready: true,
             iframePointerEvents: getComputedStyle(iframe).pointerEvents,
-            hitsIframe: hit === iframe,
+            stageSwipe: host.dataset.readerStageSwipe,
           };
         }),
       )
       .toEqual({
         ready: true,
         iframePointerEvents: "auto",
-        hitsIframe: true,
+        stageSwipe: "false",
       });
   });
 
-  test("turns a fixed-layout cover from the reader stage without blocking reflow chapters", async ({
+  test("turns a non-interactive fixed-layout cover without blocking fixed-layout links", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -165,13 +160,19 @@ test.describe("mobile", () => {
       "data-reader-fixed-layout",
       "true",
     );
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-stage-swipe",
+      "true",
+    );
     await expect(page.locator(".reader-host iframe")).toHaveCSS(
       "pointer-events",
       "none",
     );
-
     await page.locator(".reader-host").evaluate((host) => {
-      const dispatch = (type: "touchstart" | "touchend", x: number) => {
+      for (const [type, x] of [
+        ["touchstart", 300],
+        ["touchend", 120],
+      ] as const) {
         const event = new Event(type, { bubbles: true });
         const touch = { clientX: x, clientY: 260 };
         Object.defineProperty(event, "touches", {
@@ -179,16 +180,21 @@ test.describe("mobile", () => {
         });
         Object.defineProperty(event, "changedTouches", { value: [touch] });
         host.dispatchEvent(event);
-      };
-      dispatch("touchstart", 300);
-      dispatch("touchend", 120);
+      }
     });
     await expect(reader).toHaveAttribute("data-spine-index", "1");
-    // The title page is another fixed-layout spine item. Use the normal
-    // control to reach the reflowable navigation document, then verify that
-    // its iframe has native hit testing again.
-    await page.getByRole("button", { name: "下一頁" }).first().click();
-    await expect(reader).toHaveAttribute("data-spine-index", "2");
+    await expect(page.locator(".reader-host")).toHaveAttribute(
+      "data-reader-fixed-layout",
+      "true",
+    );
+    await expect(page.locator(".reader-host iframe")).toHaveCSS(
+      "pointer-events",
+      "auto",
+    );
+    await page
+      .getByRole("button", { name: "前往書內連結：chapter.xhtml" })
+      .click();
+    await expect(reader).toHaveAttribute("data-spine-index", "3");
     await expect(page.locator(".reader-host")).toHaveAttribute(
       "data-reader-fixed-layout",
       "false",

@@ -1320,7 +1320,12 @@ class ReaderSessionImpl implements ReaderSession {
     const section = this.location
       ? this.book?.spine?.get(this.location.spineIndex)
       : undefined;
-    this.element.dataset.readerFixedLayout = isFixedLayoutSection(section)
+    const fixedLayout = isFixedLayoutSection(section);
+    this.element.dataset.readerFixedLayout = fixedLayout
+      ? "true"
+      : "false";
+    this.element.dataset.readerStageSwipe =
+      fixedLayout && isNonInteractiveChapter(doc)
       ? "true"
       : "false";
     this.clearChapterGestures();
@@ -1607,7 +1612,7 @@ class ReaderSessionImpl implements ReaderSession {
     button.style.pointerEvents = "auto";
   }
 
-  /** Reposition all parent overlays (image gates + external links). */
+  /** Reposition all parent overlays (image gates + EPUB links). */
   private repositionParentOverlays(): void {
     if (typeof document === "undefined") return;
     const iframe = this.element.querySelector("iframe");
@@ -1774,28 +1779,33 @@ class ReaderSessionImpl implements ReaderSession {
     };
   }
 
-  /**
-   * Parent fixed hit-targets over external anchors — required on WebKit where
-   * sandboxed chapter documents do not reliably fire scripted click handlers.
-   */
+  /** Parent fixed hit-targets over EPUB anchors for sandboxed WebKit frames. */
   private installParentExternalLinks(doc: Document): void {
     this.clearParentExternalLinks();
     if (typeof document === "undefined") return;
     const iframe = this.element.querySelector("iframe");
     if (!iframe) return;
 
-    const anchors = Array.from(
-      doc.querySelectorAll("a[data-epub-external='1']"),
-    );
+    const anchors = Array.from(doc.querySelectorAll("a[href]")).filter((anchor) => {
+      const href = (anchor.getAttribute("href") || "").trim();
+      return (
+        Boolean(href) &&
+        (anchor.getAttribute("data-epub-external") === "1" ||
+          isSafeEpubInternalHref(href))
+      );
+    });
     for (const anchor of anchors) {
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) continue;
+      const internal = anchor.getAttribute("data-epub-external") !== "1";
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "epub-parent-external-link touch-target";
+      button.className = internal
+        ? "epub-parent-internal-link touch-target"
+        : "epub-parent-external-link touch-target";
       button.setAttribute(
         "aria-label",
-        `開啟外部連結：${href}`,
+        internal ? `前往書內連結：${href}` : `開啟外部連結：${href}`,
       );
       button.textContent = anchor.textContent?.trim() || "外部連結";
       button.style.position = "fixed";
@@ -1809,6 +1819,12 @@ class ReaderSessionImpl implements ReaderSession {
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (internal) {
+          void this.display(href).catch(() => {
+            // display() already reports a safe, user-visible navigation error.
+          });
+          return;
+        }
         this.openExternalHref(href);
       });
       document.body.appendChild(button);
@@ -2588,6 +2604,35 @@ function isFixedLayoutSection(section: AdaptedSection | null | undefined): boole
   );
 }
 
+/** Parent-stage swipes are safe only for non-interactive fixed-layout pages. */
+function isNonInteractiveChapter(doc: Document): boolean {
+  const body = doc.body;
+  if (!body) return true;
+  if (
+    body.querySelector(
+      "a[href], input, textarea, select, label, area[href], [role='button']",
+    )
+  ) {
+    return false;
+  }
+  return !Array.from(body.querySelectorAll("button")).some((button) => {
+    const label =
+      button.getAttribute("aria-label") || button.textContent?.trim() || "";
+    // Gated images have an equivalent parent-document control, so they remain
+    // reachable after this non-interactive fixed-layout page is routed to the
+    // reader stage for swiping.
+    return !label.includes("點擊顯示圖片") && !label.includes("圖片載入失敗");
+  });
+}
+
+function isSafeEpubInternalHref(href: string): boolean {
+  const lower = href.trim().toLowerCase();
+  if (!lower || lower.startsWith("javascript:")) return false;
+  if (lower.startsWith("#")) return true;
+  if (lower.startsWith("//")) return false;
+  return !/^[a-z][a-z\d+.-]*:/i.test(lower);
+}
+
 /** EPUB.js rejects this exact message when next/prev runs past the book edge. */
 function isAdjacentBoundaryError(
   error: unknown,
@@ -2597,6 +2642,7 @@ function isAdjacentBoundaryError(
   if (errorMessage(error).trim().toLowerCase() !== "no section found") {
     return false;
   }
+
   if (!location) return false;
   return direction === "prev"
     ? location.spineIndex <= 0

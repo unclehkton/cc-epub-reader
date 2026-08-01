@@ -5,7 +5,8 @@ describe("getPwaInstallPlatform", () => {
   it("returns iphone for an uninstalled iPhone browser", () => {
     expect(
       getPwaInstallPlatform({
-        userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
         standalone: false,
         displayModeStandalone: false,
         displayModeFullscreen: false,
@@ -29,6 +30,18 @@ describe("getPwaInstallPlatform", () => {
       getPwaInstallPlatform({
         userAgent:
           "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.0.0 Mobile/15E148 Safari/604.1",
+        standalone: false,
+        displayModeStandalone: false,
+        displayModeFullscreen: false,
+      }),
+    ).toBe("ios-browser");
+  });
+
+  it("asks generic iOS WKWebViews to open Safari instead", () => {
+    expect(
+      getPwaInstallPlatform({
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
         standalone: false,
         displayModeStandalone: false,
         displayModeFullscreen: false,

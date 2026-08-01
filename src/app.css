@@ -504,11 +504,11 @@ button {
   overflow: hidden;
 }
 
-/* Fixed-layout covers have no text selection/footnotes to preserve. On a
-   touch device, route their full-page swipe through the outer reader stage;
-   reflowable chapters retain normal iframe links and selection. */
+/* EPUB.js sandboxed documents can keep touch events inside the iframe. Route
+   only non-interactive fixed-layout pages through the reader stage; pages
+   with links or controls retain native iframe hit testing. */
 @media (pointer: coarse) {
-  .reader-screen--paginated .reader-host[data-reader-fixed-layout="true"] iframe {
+  .reader-screen--paginated .reader-host[data-reader-stage-swipe="true"] iframe {
     pointer-events: none;
   }
 }

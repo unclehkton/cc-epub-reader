@@ -316,7 +316,7 @@ async function buildMixedLayout(zip) {
 </package>`,
   );
 
-  const fixedPage = (title, width, height) => `<?xml version="1.0" encoding="UTF-8"?>
+  const fixedPage = (title, width, height, body = "") => `<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
   <head>
     <title>${title}</title>
@@ -333,11 +333,20 @@ async function buildMixedLayout(zip) {
         </ops:case>
         <ops:default></ops:default>
       </ops:switch>
+      ${body}
     </div>
   </body>
 </html>`;
   zip.file("OEBPS/cover.xhtml", fixedPage("封面", 999, 1417));
-  zip.file("OEBPS/titlepage.xhtml", fixedPage("書名頁", 1400, 1986));
+  zip.file(
+    "OEBPS/titlepage.xhtml",
+    fixedPage(
+      "書名頁",
+      1400,
+      1986,
+      '<a id="fixed-layout-link" href="chapter.xhtml" style="display:inline-block;font-size:24px">閱讀正文</a>',
+    ),
+  );
   zip.file(
     "OEBPS/page.css",
     "html, body { margin: 0; padding: 0; font-size: 0; } svg { margin: 0; padding: 0; }",

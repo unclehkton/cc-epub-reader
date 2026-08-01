@@ -27,13 +27,15 @@ export function getPwaInstallPlatform(
     return null;
   }
   if (/iphone|ipod/i.test(environment.userAgent)) {
-    // iOS 15 third-party browsers cannot add a site to the Home Screen. Keep
-    // Safari's instruction accurate instead of presenting its share UI in
-    // Chrome/Firefox/embedded web views.
-    if (/crios|fxios|edgios|opios|gsa|fbav|fban|instagram/i.test(environment.userAgent)) {
-      return "ios-browser";
-    }
-    return "iphone";
+    // Only Safari exposes the Share-sheet path for adding a site to the Home
+    // Screen. iOS browsers and WKWebViews share much of Safari's UA, so use
+    // Safari's own Version + Mobile + Safari shape positively rather than a
+    // brittle block list of other browser tokens.
+    return /version\/[\d.]+.*mobile\/[\w.]+.*safari\//i.test(
+      environment.userAgent,
+    )
+      ? "iphone"
+      : "ios-browser";
   }
   if (/android/i.test(environment.userAgent)) return "android";
   return null;
