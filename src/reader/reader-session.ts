@@ -1676,7 +1676,7 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
-    let hasVisibleInternalLink = false;
+    let hasVisibleLink = false;
     for (const pair of this.parentExternalLinks) {
       try {
         const rect = pair.anchor.getBoundingClientRect();
@@ -1684,19 +1684,10 @@ class ReaderSessionImpl implements ReaderSession {
           this.hideParentOverlayButton(pair.button);
           continue;
         }
-        if (pair.internal) {
-          pair.button.hidden = false;
-          pair.button.style.visibility = "visible";
-          pair.button.style.pointerEvents = "auto";
-          hasVisibleInternalLink = true;
-          continue;
-        }
-        const left = iframeRect.left + rect.left;
-        const top = iframeRect.top + rect.top;
-        pair.button.style.width = `${Math.max(44, rect.width)}px`;
-        pair.button.style.height = `${Math.max(44, rect.height)}px`;
         pair.button.hidden = false;
-        this.showParentOverlayButton(pair.button, left, top);
+        pair.button.style.visibility = "visible";
+        pair.button.style.pointerEvents = "auto";
+        hasVisibleLink = true;
       } catch {
         this.hideParentOverlayButton(pair.button);
       }
@@ -1704,7 +1695,7 @@ class ReaderSessionImpl implements ReaderSession {
 
     const dock = this.parentInternalLinkDock;
     if (!dock) return;
-    if (!hasVisibleInternalLink) {
+    if (!hasVisibleLink) {
       dock.hidden = true;
       dock.style.visibility = "hidden";
       dock.style.pointerEvents = "none";
@@ -1884,11 +1875,6 @@ class ReaderSessionImpl implements ReaderSession {
       button.style.pointerEvents = "auto";
       button.style.maxWidth = "16rem";
       button.style.visibility = "hidden";
-      if (!internal) {
-        button.style.position = "fixed";
-        button.style.minWidth = "44px";
-        button.style.minHeight = "44px";
-      }
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1905,11 +1891,7 @@ class ReaderSessionImpl implements ReaderSession {
         }
         this.openExternalHref(href);
       });
-      if (internal) {
-        this.ensureParentInternalLinkDock().appendChild(button);
-      } else {
-        this.element.appendChild(button);
-      }
+      this.ensureParentInternalLinkDock().appendChild(button);
       this.parentExternalLinks.push({ anchor, button, href, internal, reference });
       // Prefer parent control; keep in-frame link for semantics only.
       try {

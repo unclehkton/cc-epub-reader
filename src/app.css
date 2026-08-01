@@ -615,7 +615,8 @@ button {
 }
 
 .epub-parent-reference-link,
-.epub-parent-internal-link {
+.epub-parent-internal-link,
+.epub-parent-external-link {
   flex: 0 0 auto;
   min-width: 1.75rem;
   height: 1.75rem;
@@ -631,7 +632,8 @@ button {
 }
 
 .epub-parent-reference-link:focus-visible,
-.epub-parent-internal-link:focus-visible {
+.epub-parent-internal-link:focus-visible,
+.epub-parent-external-link:focus-visible {
   outline: 2px solid var(--reader-amber);
   outline-offset: 2px;
 }

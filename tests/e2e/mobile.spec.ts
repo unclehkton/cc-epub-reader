@@ -21,7 +21,11 @@ import {
 test.describe("mobile", () => {
   test("shows uninstalled-phone home-screen guidance without blocking import", async ({
     page,
-  }) => {
+  }, testInfo) => {
+    test.skip(
+      !testInfo.project.name.startsWith("Mobile "),
+      "Home-screen guidance is intentionally limited to iPhone and Android browsers.",
+    );
     await page.setViewportSize({ width: 390, height: 844 });
     await gotoLibrary(page);
 

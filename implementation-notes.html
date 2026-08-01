@@ -62,6 +62,13 @@
     <li><strong>Fresh verification:</strong> <code>npm run test:run</code> passed <strong>258/258</strong>; <code>npm run check</code>, production/PWA <code>npm run build</code>, and <code>npm run check:bundle</code> passed. The initial shell is <strong>78,051 bytes gzip</strong> against its 153,600-byte budget. The focused fixed-layout link test passed in Chromium, WebKit, Mobile Chrome, and Mobile Safari.</li>
   </ul>
 
+  <h2>2026-08-01 CI hardening before production merge</h2>
+  <ul>
+    <li><strong>Phone-only PWA assertion:</strong> the home-screen guidance regression now runs only in the Mobile Chrome and Mobile Safari Playwright projects. This matches the product rule that the card is detected from iPhone/Android browser data, rather than merely from a narrow desktop viewport.</li>
+    <li><strong>External-link controls:</strong> external EPUB links now use the same compact bottom dock as internal links and footnotes. This removes their full-size parent overlays, so multiple links cannot overlap each other, obscure page content, or block reader controls. Their parent <code>window.open(..., &quot;noopener,noreferrer&quot;)</code> safety path is unchanged.</li>
+    <li><strong>Fresh verification:</strong> after a production/PWA build, the phone install regression passed on Mobile Chrome and Mobile Safari (2 passed, 2 intentionally skipped desktop projects); the external-link opener regression passed in Chromium, WebKit, Mobile Chrome, and Mobile Safari (4/4).</li>
+  </ul>
+
   <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>
