@@ -2,7 +2,7 @@
 
 **Branch:** `feature/release-0.1`  
 **Product URL (target):** `https://books.pkwor.com`  
-**Status:** Local gates verified, but **release approval is blocked by the 2026-07-21 critical code review**. Not deployed.
+**Status:** Merged exact SHA `88d20c0` to `main` and deployed to Cloudflare Pages `books-pkwor` (2026-07-24). Review remaining P1: 0.
 
 ## Local gates (required before handoff)
 

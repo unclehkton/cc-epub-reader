@@ -278,8 +278,116 @@ async function buildLargeChapter(zip) {
   );
 }
 
+async function buildMixedLayout(zip) {
+  zip.file(
+    "META-INF/container.xml",
+    `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`,
+  );
+
+  zip.file(
+    "OEBPS/content.opf",
+    `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:uuid:mixed-layout-0001</dc:identifier>
+    <dc:title>這是用來測試手機閱讀器版面不應被書名撐闊的超長書名</dc:title>
+    <dc:creator>版面測試</dc:creator>
+    <dc:language>zh-HK</dc:language>
+  </metadata>
+  <manifest>
+    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml" properties="svg switch"/>
+    <item id="titlepage" href="titlepage.xhtml" media-type="application/xhtml+xml" properties="svg switch"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+    <item id="image" href="cover.png" media-type="image/png"/>
+    <item id="page-style" href="page.css" media-type="text/css"/>
+  </manifest>
+  <spine>
+    <itemref idref="cover" properties="rendition:layout-pre-paginated rendition:spread-none rendition:page-spread-center"/>
+    <itemref idref="titlepage" properties="rendition:layout-pre-paginated rendition:spread-none rendition:page-spread-center"/>
+    <itemref idref="nav"/>
+    <itemref idref="chapter"/>
+  </spine>
+</package>`,
+  );
+
+  const fixedPage = (title, width, height, body = "") => `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <title>${title}</title>
+    <meta name="viewport" content="width=${width}, height=${height}"/>
+    <link href="page.css" rel="stylesheet" type="text/css"/>
+  </head>
+  <body>
+    <div style="text-align: center; padding: 0; margin: 0;">
+      <ops:switch xmlns:ops="http://www.idpf.org/2007/ops">
+        <ops:case required-namespace="http://www.w3.org/2000/svg">
+          <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100%" height="100%" viewBox="0 0 ${width} ${height}">
+            <image xlink:href="cover.png" width="${width}" height="${height}"/>
+          </svg>
+        </ops:case>
+        <ops:default></ops:default>
+      </ops:switch>
+      ${body}
+    </div>
+  </body>
+</html>`;
+  zip.file("OEBPS/cover.xhtml", fixedPage("封面", 999, 1417));
+  zip.file(
+    "OEBPS/titlepage.xhtml",
+    fixedPage(
+      "書名頁",
+      1400,
+      1986,
+      '<a id="fixed-layout-link" href="chapter.xhtml" style="display:inline-block;font-size:24px">閱讀正文</a>',
+    ),
+  );
+  zip.file(
+    "OEBPS/page.css",
+    "html, body { margin: 0; padding: 0; font-size: 0; } svg { margin: 0; padding: 0; }",
+  );
+
+  zip.file(
+    "OEBPS/nav.xhtml",
+    `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <head><title>目錄</title></head>
+  <body><nav epub:type="toc"><ol><li><a href="chapter.xhtml">長章節</a></li></ol></nav></body>
+</html>`,
+  );
+
+  const paragraphs = Array.from(
+    { length: 40 },
+    (_, index) =>
+      `<p>第${index + 1}段：這是混合固定及可重排版面的測試文字，用來確保手機畫面不會向右溢出，所有內容及下一頁按鈕都保持可見。</p>`,
+  ).join("\n");
+  zip.file(
+    "OEBPS/chapter.xhtml",
+    `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="zh-HK">
+  <head><title>長章節</title></head>
+  <body><h1>混合版面後的長章節</h1>${paragraphs}</body>
+</html>`,
+  );
+  zip.file("OEBPS/cover.png", TINY_PNG);
+}
+
 // silence unused helper warning in strict tooling
 void escapeXml;
 
-await writeEpub("reader-fixture.epub", buildReaderFixture);
-await writeEpub("large-chapter.epub", buildLargeChapter);
+const requestedFixtures = new Set(process.argv.slice(2));
+const generateAll = requestedFixtures.size === 0;
+if (generateAll || requestedFixtures.has("reader-fixture.epub")) {
+  await writeEpub("reader-fixture.epub", buildReaderFixture);
+}
+if (generateAll || requestedFixtures.has("large-chapter.epub")) {
+  await writeEpub("large-chapter.epub", buildLargeChapter);
+}
+if (generateAll || requestedFixtures.has("mixed-layout.epub")) {
+  await writeEpub("mixed-layout.epub", buildMixedLayout);
+}

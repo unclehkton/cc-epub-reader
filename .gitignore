@@ -5,6 +5,10 @@ playwright-report/
 test-results/
 .superpowers/
 .worktrees/
+.agents/
+AGENTS.md
+AGENTS.local.md
+.wrangler/
 .DS_Store
 *.log
 *.tsbuildinfo

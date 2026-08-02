@@ -23,6 +23,8 @@ import {
   formatFileSizeMiB,
 } from "../platform/import-policy";
 import { validateEpub } from "./epub-validator";
+import { PwaInstallPrompt } from "./pwa-install-prompt";
+import type { PwaInstallPromptModel } from "../platform/use-pwa-install-prompt";
 
 export interface BookSelection {
   /** May be metadata-only from the list; App must getBook() before reading. */
@@ -45,6 +47,8 @@ export interface LibraryScreenProps {
   sessionOnlyMessage?: string | null;
   /** Optional settings repo for chrome language + license entry. */
   settingsRepository?: SettingsRepositoryLike;
+  /** Browser-specific PWA install guidance supplied by the app shell. */
+  pwaInstallPrompt?: PwaInstallPromptModel;
 }
 
 interface PendingDelete {
@@ -69,6 +73,7 @@ export function LibraryScreen({
   sessionOnly = false,
   sessionOnlyMessage = null,
   settingsRepository,
+  pwaInstallPrompt,
 }: LibraryScreenProps) {
   const [books, setBooks] = useState<LibraryBook[]>([]);
   const [loading, setLoading] = useState(true);
@@ -278,6 +283,10 @@ export function LibraryScreen({
           />
         ))}
       </ul>
+
+      {pwaInstallPrompt ? (
+        <PwaInstallPrompt model={pwaInstallPrompt} uiLanguage={uiLanguage} />
+      ) : null}
 
       <footer class="library-footer">
         <button

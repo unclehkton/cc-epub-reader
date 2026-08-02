@@ -34,6 +34,7 @@ import {
   type AdaptedLocation,
   type AdaptedNavItem,
   type AdaptedRendition,
+  type AdaptedSection,
   type EpubFactory,
   type RenditionCreateOptions,
 } from "./epub-adapter";
@@ -177,6 +178,11 @@ class ReaderSessionImpl implements ReaderSession {
   /** Debounce token for geometry rebind — never shares nav generation. */
   private resizeToken = 0;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * rAF coalescing for appearance-driven relayout. Ensures theme CSS injects
+   * before epub.js remeasures paginated columns.
+   */
+  private appearanceRelayoutRaf: number | null = null;
   /** Bumps on EPUB.js `rendered`; used to reject stale chapter documents. */
   private renderEpoch = 0;
   private pendingRenderWaiters: Array<() => void> = [];
@@ -220,12 +226,16 @@ class ReaderSessionImpl implements ReaderSession {
     inFrameButton: HTMLElement;
     button: HTMLButtonElement;
   }> = [];
-  /** Parent overlays for external links (WebKit iframe listeners are unreliable). */
+  /** Parent overlays for EPUB links (WebKit iframe listeners are unreliable). */
   private parentExternalLinks: Array<{
     anchor: Element;
     button: HTMLButtonElement;
     href: string;
+    internal: boolean;
+    reference: boolean;
   }> = [];
+  /** One compact dock groups visible EPUB-local links away from chapter text. */
+  private parentInternalLinkDock: HTMLDivElement | null = null;
   private parentOverlayRepositionTimer: ReturnType<typeof setInterval> | null =
     null;
   private externalLinkDisposer: (() => void) | null = null;
@@ -426,6 +436,10 @@ class ReaderSessionImpl implements ReaderSession {
         if (!this.isCurrent(gen)) return;
         this.discardPendingTransform();
         await this.rebindCurrentChapter({ skipLocationSync: true });
+        if (isAdjacentBoundaryError(error, direction, this.location)) {
+          this.emit({ type: "status", status: "idle" });
+          return;
+        }
         this.emit({
           type: "status",
           status: "error",
@@ -980,26 +994,47 @@ class ReaderSessionImpl implements ReaderSession {
 
   applyAppearance(settings: AppearanceSettings): void {
     if (this.destroyed) return;
-    this.appearance = { ...settings };
-    const rendition = this.rendition;
-    if (!rendition?.themes) return;
+    const prev = this.appearance;
+    const next: AppearanceSettings = {
+      fontSizePercent: settings.fontSizePercent,
+      fontFamily: settings.fontFamily,
+      background: settings.background,
+      theme: settings.theme,
+      horizontalMarginPercent: Math.max(
+        0,
+        Math.min(20, Math.round(settings.horizontalMarginPercent ?? 4)),
+      ),
+    };
+    // Font/family/margin alter column metrics. WebKit also needs a remeasure
+    // after background/theme overrides; otherwise it can retain stale columns
+    // until the next page turn.
+    const reflowChanged =
+      prev.fontSizePercent !== next.fontSizePercent ||
+      prev.fontFamily !== next.fontFamily ||
+      (prev.horizontalMarginPercent ?? 4) !== (next.horizontalMarginPercent ?? 4) ||
+      prev.background !== next.background ||
+      prev.theme !== next.theme;
 
-    const resolvedTheme = resolveTheme(settings.theme);
+    this.appearance = next;
+    const rendition = this.rendition;
+    if (!rendition?.themes) {
+      // Retain settings; schedule relayout once a rendition exists if needed.
+      if (reflowChanged) this.scheduleAppearanceRelayout();
+      return;
+    }
+
+    const resolvedTheme = resolveTheme(next.theme);
     const themeColors = THEME_COLORS[resolvedTheme];
     const background =
       resolvedTheme === "night"
         ? themeColors.background
-        : BACKGROUNDS[settings.background];
+        : BACKGROUNDS[next.background];
     const color = themeColors.color;
-    const marginPercent = Math.max(
-      0,
-      Math.min(20, Math.round(settings.horizontalMarginPercent ?? 4)),
-    );
-    const margin = `${marginPercent}%`;
+    const margin = `${next.horizontalMarginPercent ?? 4}%`;
 
     try {
-      rendition.themes.fontSize(`${settings.fontSizePercent}%`);
-      rendition.themes.font(FONT_STACKS[settings.fontFamily]);
+      rendition.themes.fontSize(`${next.fontSizePercent}%`);
+      rendition.themes.font(FONT_STACKS[next.fontFamily]);
       rendition.themes.override("color", color, true);
       rendition.themes.override("background-color", background, true);
       rendition.themes.override("background", background, true);
@@ -1015,6 +1050,10 @@ class ReaderSessionImpl implements ReaderSession {
     } catch {
       // ignore
     }
+
+    if (reflowChanged) {
+      this.scheduleAppearanceRelayout();
+    }
   }
 
   destroy(): void {
@@ -1023,6 +1062,10 @@ class ReaderSessionImpl implements ReaderSession {
     this.destroyed = true;
     this.inflightOps = 0;
     this.resizeToken += 1;
+    if (this.appearanceRelayoutRaf !== null) {
+      cancelAnimationFrame(this.appearanceRelayoutRaf);
+      this.appearanceRelayoutRaf = null;
+    }
     if (this.resizeTimer !== null) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
@@ -1063,6 +1106,29 @@ class ReaderSessionImpl implements ReaderSession {
     await rendition.display(target);
     if (!this.isCurrent(gen)) return;
     await this.settleAfterNavigation(gen, before);
+  }
+
+  /**
+   * After appearance CSS inject, wait two parent frames so theme CSS can
+   * propagate into the chapter iframe before epub.js remeasures columns.
+   * Coalesces rapid A+/A− taps into a single resize.
+   */
+  private scheduleAppearanceRelayout(): void {
+    if (this.destroyed) return;
+    if (this.appearanceRelayoutRaf !== null) {
+      cancelAnimationFrame(this.appearanceRelayoutRaf);
+    }
+    this.appearanceRelayoutRaf = requestAnimationFrame(() => {
+      if (this.destroyed) {
+        this.appearanceRelayoutRaf = null;
+        return;
+      }
+      this.appearanceRelayoutRaf = requestAnimationFrame(() => {
+        this.appearanceRelayoutRaf = null;
+        if (this.destroyed || !this.rendition) return;
+        this.resize();
+      });
+    });
   }
 
   /**
@@ -1257,6 +1323,17 @@ class ReaderSessionImpl implements ReaderSession {
       }
       this.transformResult = null;
     }
+    const section = this.location
+      ? this.book?.spine?.get(this.location.spineIndex)
+      : undefined;
+    const fixedLayout = isFixedLayoutSection(section);
+    this.element.dataset.readerFixedLayout = fixedLayout
+      ? "true"
+      : "false";
+    this.element.dataset.readerStageSwipe =
+      fixedLayout && isNonInteractiveChapter(doc)
+      ? "true"
+      : "false";
     this.clearChapterGestures();
     const materialize = this.makeMaterialize();
     this.transformResult = rebindImageGates(doc, {
@@ -1267,9 +1344,10 @@ class ReaderSessionImpl implements ReaderSession {
     // WebKit. Parent-document overlay buttons receive real clicks safely.
     this.installParentImageGates(doc, materialize);
     this.installParentExternalLinks(doc);
-    // Touch/click inside the chapter iframe do not bubble to the parent —
-    // attach gestures on the live chapter document.
-    this.installChapterGestures(doc);
+    // Touch/click inside the chapter iframe do not bubble to the parent.
+    // EPUB.js can expose a pre-serialization document through getContents(),
+    // so explicitly prefer the iframe's current document for gesture events.
+    this.installChapterGestures(readIframeDocument(this.element) ?? doc);
     // Inject package CSS as sanitized <style> via bounded archive reader
     // (never createUrl). Single-flight per Document.
     if (!options?.skipCssInject) {
@@ -1341,32 +1419,17 @@ class ReaderSessionImpl implements ReaderSession {
   private installChapterGestures(doc: Document): void {
     this.clearChapterGestures();
     let touchStart: { x: number; y: number; time: number } | null = null;
+    let pointerStart: { x: number; y: number; time: number } | null = null;
+    let ignoreTouchUntil = 0;
     let suppressTap = false;
 
-    const onTouchStart = (event: TouchEvent) => {
-      if (event.touches.length !== 1) {
-        touchStart = null;
-        return;
-      }
-      const touch = event.touches[0]!;
-      touchStart = {
-        x: touch.clientX,
-        y: touch.clientY,
-        time: Date.now(),
-      };
-    };
-
-    const onTouchEnd = (event: TouchEvent) => {
-      const start = touchStart;
-      touchStart = null;
-      if (!start || event.changedTouches.length === 0) return;
+    const handleSwipe = (start: { x: number; y: number; time: number }, endX: number, endY: number) => {
       if (this.flow !== "paginated") return;
-      const touch = event.changedTouches[0]!;
       const direction = classifySwipe({
         startX: start.x,
         startY: start.y,
-        endX: touch.clientX,
-        endY: touch.clientY,
+        endX,
+        endY,
         durationMs: Date.now() - start.time,
       });
       if (!direction) return;
@@ -1382,8 +1445,61 @@ class ReaderSessionImpl implements ReaderSession {
       }
     };
 
+    const onTouchStart = (event: TouchEvent) => {
+      if (Date.now() < ignoreTouchUntil) return;
+      if (event.touches.length !== 1) {
+        touchStart = null;
+        return;
+      }
+      const touch = event.touches[0]!;
+      touchStart = {
+        x: touch.clientX,
+        y: touch.clientY,
+        time: Date.now(),
+      };
+    };
+
+    const onTouchEnd = (event: TouchEvent) => {
+      if (Date.now() < ignoreTouchUntil) {
+        touchStart = null;
+        return;
+      }
+      const start = touchStart;
+      touchStart = null;
+      if (!start || event.changedTouches.length === 0) return;
+      const touch = event.changedTouches[0]!;
+      handleSwipe(start, touch.clientX, touch.clientY);
+    };
+
+    // iOS 15+ reliably delivers pointer events inside an EPUB iframe while
+    // preserving native hit testing for links, footnotes, and text selection.
+    const onPointerDown = (event: PointerEvent) => {
+      if (!event.isPrimary || event.pointerType !== "touch") return;
+      pointerStart = {
+        x: event.clientX,
+        y: event.clientY,
+        time: Date.now(),
+      };
+    };
+
+    const onPointerUp = (event: PointerEvent) => {
+      if (!event.isPrimary || event.pointerType !== "touch") return;
+      const start = pointerStart;
+      pointerStart = null;
+      if (!start) return;
+      // Touch compatibility events usually follow pointerup. Do not turn one
+      // physical swipe twice when a browser exposes both event families.
+      ignoreTouchUntil = Date.now() + 750;
+      touchStart = null;
+      handleSwipe(start, event.clientX, event.clientY);
+    };
+
     const onTouchCancel = () => {
       touchStart = null;
+    };
+
+    const onPointerCancel = () => {
+      pointerStart = null;
     };
 
     const onClick = (event: Event) => {
@@ -1403,13 +1519,52 @@ class ReaderSessionImpl implements ReaderSession {
     doc.addEventListener("touchstart", onTouchStart, { passive: true });
     doc.addEventListener("touchend", onTouchEnd, { passive: true });
     doc.addEventListener("touchcancel", onTouchCancel, { passive: true });
+    doc.addEventListener("pointerdown", onPointerDown, { passive: true });
+    doc.addEventListener("pointerup", onPointerUp, { passive: true });
+    doc.addEventListener("pointercancel", onPointerCancel, { passive: true });
     doc.addEventListener("click", onClick);
+
+    // WebKit can keep a sandboxed iframe's event path on its Window rather
+    // than bubbling through the Document. Capture there as well while keeping
+    // the document listener for DOMParser/test and older engines.
+    const chapterWindow = doc.defaultView;
+    chapterWindow?.addEventListener("pointerdown", onPointerDown, {
+      capture: true,
+      passive: true,
+    });
+    chapterWindow?.addEventListener("pointerup", onPointerUp, {
+      capture: true,
+      passive: true,
+    });
+    chapterWindow?.addEventListener("pointercancel", onPointerCancel, {
+      capture: true,
+      passive: true,
+    });
+    // Some WebKit sandbox paths stop at the <iframe> boundary instead of
+    // reaching the chapter Window. The boundary fallback keeps the iframe
+    // itself fully interactive (links and selection are untouched) while
+    // still allowing a touch swipe to turn a paginated page.
+    const iframe = this.element.querySelector("iframe");
+    iframe?.addEventListener("pointerdown", onPointerDown, { passive: true });
+    iframe?.addEventListener("pointerup", onPointerUp, { passive: true });
+    iframe?.addEventListener("pointercancel", onPointerCancel, {
+      passive: true,
+    });
 
     this.chapterGestureDisposer = () => {
       doc.removeEventListener("touchstart", onTouchStart);
       doc.removeEventListener("touchend", onTouchEnd);
       doc.removeEventListener("touchcancel", onTouchCancel);
+      doc.removeEventListener("pointerdown", onPointerDown);
+      doc.removeEventListener("pointerup", onPointerUp);
+      doc.removeEventListener("pointercancel", onPointerCancel);
       doc.removeEventListener("click", onClick);
+      chapterWindow?.removeEventListener("pointerdown", onPointerDown, true);
+      chapterWindow?.removeEventListener("pointerup", onPointerUp, true);
+      chapterWindow?.removeEventListener("pointercancel", onPointerCancel, true);
+      iframe?.removeEventListener("pointerdown", onPointerDown);
+      iframe?.removeEventListener("pointerup", onPointerUp);
+      iframe?.removeEventListener("pointercancel", onPointerCancel);
     };
   }
 
@@ -1477,7 +1632,7 @@ class ReaderSessionImpl implements ReaderSession {
     button.style.pointerEvents = "auto";
   }
 
-  /** Reposition all parent overlays (image gates + external links). */
+  /** Reposition all parent overlays (image gates + EPUB links). */
   private repositionParentOverlays(): void {
     if (typeof document === "undefined") return;
     const iframe = this.element.querySelector("iframe");
@@ -1521,6 +1676,7 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
 
+    let hasVisibleLink = false;
     for (const pair of this.parentExternalLinks) {
       try {
         const rect = pair.anchor.getBoundingClientRect();
@@ -1528,16 +1684,31 @@ class ReaderSessionImpl implements ReaderSession {
           this.hideParentOverlayButton(pair.button);
           continue;
         }
-        const left = iframeRect.left + rect.left;
-        const top = iframeRect.top + rect.top;
-        pair.button.style.width = `${Math.max(44, rect.width)}px`;
-        pair.button.style.height = `${Math.max(44, rect.height)}px`;
         pair.button.hidden = false;
-        this.showParentOverlayButton(pair.button, left, top);
+        pair.button.style.visibility = "visible";
+        pair.button.style.pointerEvents = "auto";
+        hasVisibleLink = true;
       } catch {
         this.hideParentOverlayButton(pair.button);
       }
     }
+
+    const dock = this.parentInternalLinkDock;
+    if (!dock) return;
+    if (!hasVisibleLink) {
+      dock.hidden = true;
+      dock.style.visibility = "hidden";
+      dock.style.pointerEvents = "none";
+      return;
+    }
+    // Keep note controls at the bottom edge of the reading stage, where they
+    // stay reachable without covering the paragraph containing the reference.
+    dock.hidden = false;
+    dock.style.left = `${Math.max(8, iframeRect.left + 8)}px`;
+    dock.style.top = `${Math.max(8, iframeRect.bottom - 36)}px`;
+    dock.style.maxWidth = `${Math.max(0, iframeRect.width - 16)}px`;
+    dock.style.visibility = "visible";
+    dock.style.pointerEvents = "auto";
   }
 
   private ensureParentOverlayTimer(): void {
@@ -1587,6 +1758,12 @@ class ReaderSessionImpl implements ReaderSession {
       }
     }
     this.parentExternalLinks = [];
+    try {
+      this.parentInternalLinkDock?.remove();
+    } catch {
+      // ignore
+    }
+    this.parentInternalLinkDock = null;
     if (this.parentGatePairs.length === 0) {
       this.clearParentOverlaysTimer();
     }
@@ -1630,59 +1807,92 @@ class ReaderSessionImpl implements ReaderSession {
     const onClick = (event: Event): void => {
       const target = eventTargetElement(event.target);
       if (!target) return;
-      const anchor = closestElement(target, "a[data-epub-external='1']");
+      const anchor = closestElement(target, "a[href]");
       if (!anchor) return;
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) return;
       event.preventDefault();
       event.stopPropagation();
-      this.openExternalHref(href);
+      if (anchor.getAttribute("data-epub-external") === "1") {
+        this.openExternalHref(href);
+        return;
+      }
+      if (!isSafeEpubInternalHref(href)) return;
+      const destination = resolveEpubInternalHref(href, this.location?.spineHref);
+      if (!destination) return;
+      void this.display(destination).catch(() => {
+        // display() already reports a safe, user-visible navigation error.
+      });
     };
-    doc.addEventListener("click", onClick, true);
+    // Let EPUB/content link handlers run first, then normalize navigation at
+    // the document bubble boundary before the iframe follows the raw href.
+    doc.addEventListener("click", onClick);
     this.externalLinkDisposer = () => {
-      doc.removeEventListener("click", onClick, true);
+      doc.removeEventListener("click", onClick);
     };
   }
 
-  /**
-   * Parent fixed hit-targets over external anchors — required on WebKit where
-   * sandboxed chapter documents do not reliably fire scripted click handlers.
-   */
+  /** Parent hit-targets over EPUB anchors for sandboxed WebKit frames. */
   private installParentExternalLinks(doc: Document): void {
     this.clearParentExternalLinks();
     if (typeof document === "undefined") return;
     const iframe = this.element.querySelector("iframe");
     if (!iframe) return;
 
-    const anchors = Array.from(
-      doc.querySelectorAll("a[data-epub-external='1']"),
+    const anchors = Array.from(doc.querySelectorAll("a[href]")).filter(
+      (anchor) => {
+        const href = (anchor.getAttribute("href") || "").trim();
+        return (
+          Boolean(href) &&
+          (anchor.getAttribute("data-epub-external") === "1" ||
+            isSafeEpubInternalHref(href))
+        );
+      },
     );
     for (const anchor of anchors) {
       const href = (anchor.getAttribute("href") || "").trim();
       if (!href) continue;
+      const internal = anchor.getAttribute("data-epub-external") !== "1";
+      const reference = internal && isEpubReferenceLink(anchor, href);
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "epub-parent-external-link touch-target";
+      button.className = reference
+        ? "epub-parent-reference-link"
+        : internal
+          ? "epub-parent-internal-link"
+          : "epub-parent-external-link touch-target";
       button.setAttribute(
         "aria-label",
-        `開啟外部連結：${href}`,
+        reference
+          ? `前往參考註釋：${href}`
+          : internal
+            ? `前往書內連結：${href}`
+            : `開啟外部連結：${href}`,
       );
-      button.textContent = anchor.textContent?.trim() || "外部連結";
-      button.style.position = "fixed";
+      button.textContent = anchor.textContent?.trim() || (reference ? "註" : "外部連結");
       // Above parent image gates (z-index 20) so a mis-parked gate cannot steal taps.
       button.style.zIndex = "21";
-      button.style.minWidth = "44px";
-      button.style.minHeight = "44px";
       button.style.pointerEvents = "auto";
       button.style.maxWidth = "16rem";
       button.style.visibility = "hidden";
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        if (internal) {
+          const target = resolveEpubInternalHref(
+            href,
+            this.location?.spineHref,
+          );
+          if (!target) return;
+          void this.display(target).catch(() => {
+            // display() already reports a safe, user-visible navigation error.
+          });
+          return;
+        }
         this.openExternalHref(href);
       });
-      document.body.appendChild(button);
-      this.parentExternalLinks.push({ anchor, button, href });
+      this.ensureParentInternalLinkDock().appendChild(button);
+      this.parentExternalLinks.push({ anchor, button, href, internal, reference });
       // Prefer parent control; keep in-frame link for semantics only.
       try {
         (anchor as HTMLElement).style.pointerEvents = "none";
@@ -1694,6 +1904,20 @@ class ReaderSessionImpl implements ReaderSession {
     this.repositionParentOverlays();
     requestAnimationFrame(() => this.repositionParentOverlays());
     this.ensureParentOverlayTimer();
+  }
+
+  private ensureParentInternalLinkDock(): HTMLDivElement {
+    if (this.parentInternalLinkDock) return this.parentInternalLinkDock;
+    const dock = document.createElement("div");
+    dock.className = "epub-link-dock";
+    dock.setAttribute("aria-label", "本頁書內連結");
+    dock.style.position = "fixed";
+    dock.style.zIndex = "21";
+    dock.style.visibility = "hidden";
+    dock.style.pointerEvents = "none";
+    this.element.appendChild(dock);
+    this.parentInternalLinkDock = dock;
+    return dock;
   }
 
   /**
@@ -1821,7 +2045,7 @@ class ReaderSessionImpl implements ReaderSession {
           if (idx >= 0) this.parentGatePairs.splice(idx, 1);
         })();
       });
-      document.body.appendChild(button);
+      this.element.appendChild(button);
       this.parentGatePairs.push(pair);
     }
     this.repositionParentOverlays();
@@ -2304,17 +2528,24 @@ function readBookSummary(book: AdaptedBook): BookSummary {
   const meta = book.packaging?.metadata;
   const title = meta?.title?.trim() || "Untitled";
   const creator = meta?.creator?.trim() || undefined;
-  const toc = flattenToc(book.navigation?.toc ?? []);
+  // Navigation item hrefs are relative to nav.xhtml (or toc.ncx), whereas
+  // rendition.display() expects package-relative spine paths.
+  const navigationPath = book.packaging?.navPath || book.packaging?.ncxPath;
+  const toc = flattenToc(book.navigation?.toc ?? [], navigationPath);
   return creator ? { title, creator, toc } : { title, toc };
 }
 
 function flattenToc(
   items: AdaptedNavItem[],
+  navigationPath?: string,
 ): Array<{ label: string; href: string }> {
   const out: Array<{ label: string; href: string }> = [];
   const walk = (list: AdaptedNavItem[]): void => {
     for (const item of list) {
-      out.push({ label: item.label, href: item.href });
+      out.push({
+        label: item.label,
+        href: resolveEpubTocHref(item.href, navigationPath),
+      });
       if (item.subitems && item.subitems.length > 0) {
         walk(item.subitems);
       }
@@ -2447,6 +2678,101 @@ function resolveTheme(
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   return String(error);
+}
+
+/** EPUB.js preserves the spine rendition property on each section. */
+function isFixedLayoutSection(section: AdaptedSection | null | undefined): boolean {
+  return Boolean(
+    section?.properties?.some(
+      (property) => property.toLowerCase() === "rendition:layout-pre-paginated",
+    ),
+  );
+}
+
+/** Parent-stage swipes are safe only for non-interactive fixed-layout pages. */
+function isNonInteractiveChapter(doc: Document): boolean {
+  const body = doc.body;
+  if (!body) return true;
+  if (
+    body.querySelector(
+      "a[href], input, textarea, select, label, area[href], [role='button']",
+    )
+  ) {
+    return false;
+  }
+  return !Array.from(body.querySelectorAll("button")).some((button) => {
+    const label =
+      button.getAttribute("aria-label") || button.textContent?.trim() || "";
+    // Gated images have an equivalent parent-document control, so they remain
+    // reachable after this non-interactive fixed-layout page is routed to the
+    // reader stage for swiping.
+    return !label.includes("點擊顯示圖片") && !label.includes("圖片載入失敗");
+  });
+}
+
+function isSafeEpubInternalHref(href: string): boolean {
+  const lower = href.trim().toLowerCase();
+  if (!lower || lower.startsWith("javascript:")) return false;
+  if (lower.startsWith("#")) return true;
+  if (lower.startsWith("//")) return false;
+  return !/^[a-z][a-z\d+.-]*:/i.test(lower);
+}
+
+/** EPUB note references conventionally use `epub:type=noteref` or a numbered note fragment. */
+function isEpubReferenceLink(anchor: Element, href: string): boolean {
+  if (!href.includes("#")) return false;
+  const epubType = anchor.getAttribute("epub:type") || "";
+  if (/(?:^|\s)noteref(?:\s|$)/i.test(epubType)) return true;
+  const label = anchor.textContent?.trim() || "";
+  const fragment = href.slice(href.indexOf("#") + 1);
+  return (
+    /^[\[\(（]?\s*\d{1,4}[\]\)）]?\s*$/.test(label) &&
+    /(?:note|footnote|endnote|noteref|fn|ref)/i.test(fragment)
+  );
+}
+
+/** Resolve EPUB-local hrefs from the current spine path before display(). */
+export function resolveEpubInternalHref(
+  href: string,
+  currentSpineHref?: string,
+): string | null {
+  const trimmed = href.trim();
+  if (!isSafeEpubInternalHref(trimmed)) return null;
+  const base = (currentSpineHref || "").replace(/^\/+/, "");
+  if (!base && trimmed.startsWith("#")) return null;
+  try {
+    const resolved = new URL(
+      trimmed,
+      `https://epub.local/${base || "index.xhtml"}`,
+    );
+    return `${resolved.pathname.replace(/^\//, "")}${resolved.search}${resolved.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalize navigation-document-relative TOC links for rendition.display(). */
+export function resolveEpubTocHref(
+  href: string,
+  navigationPath?: string,
+): string {
+  return resolveEpubInternalHref(href, navigationPath) ?? href.trim();
+}
+
+/** EPUB.js rejects this exact message when next/prev runs past the book edge. */
+function isAdjacentBoundaryError(
+  error: unknown,
+  direction: "next" | "prev",
+  location: ReaderLocation | null,
+): boolean {
+  if (errorMessage(error).trim().toLowerCase() !== "no section found") {
+    return false;
+  }
+
+  if (!location) return false;
+  return direction === "prev"
+    ? location.spineIndex <= 0
+    : location.spineIndex >= location.spineCount - 1;
 }
 
 function normalizeResume(

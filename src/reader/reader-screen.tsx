@@ -605,6 +605,9 @@ export function ReaderScreen({
         "reader-screen",
         `reader-screen--${resolvedTheme}`,
         `reader-screen--bg-${settings.background}`,
+        settings.flow === "scrolled"
+          ? "reader-screen--scrolled"
+          : "reader-screen--paginated",
         sidePanel ? "reader-screen--side-toc" : "",
         tocSide === "right" ? "reader-screen--toc-right" : "",
         chromeHidden ? "reader-screen--chrome-hidden" : "",
