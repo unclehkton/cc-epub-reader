@@ -527,6 +527,14 @@ button {
   height: auto !important;
 }
 
+/* Parent image gates are compact controls, not EPUB viewport children. Keep
+   the shared iframe sizing rule from stretching them over page navigation. */
+.reader-host > .epub-parent-image-gate {
+  width: auto !important;
+  max-width: calc(100vw - 1rem) !important;
+  height: auto !important;
+}
+
 .reader-host iframe {
   max-width: 100% !important;
 }

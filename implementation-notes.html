@@ -69,6 +69,15 @@
     <li><strong>Fresh verification:</strong> after a production/PWA build, the phone install regression passed on Mobile Chrome and Mobile Safari (2 passed, 2 intentionally skipped desktop projects); the external-link opener regression passed in Chromium, WebKit, Mobile Chrome, and Mobile Safari (4/4).</li>
   </ul>
 
+  <h2>2026-08-02 mobile image gate page-navigation follow-up</h2>
+  <ul>
+    <li><strong>Reported symptom:</strong> on a phone, the supplied EPUB&rsquo;s <code>點擊顯示圖片</code> control expanded into a dark full-page panel and covered the bottom previous/progress/next navigation bar.</li>
+    <li><strong>Root cause:</strong> parent image gates are appended directly to <code>.reader-host</code>, so the shared direct-child rule intended for EPUB.js&rsquo;s iframe applied <code>width: 100%</code> and <code>height: 100%</code> to the button. The fixed overlay consequently extended past the reader stage into the footer.</li>
+    <li><strong>Fix:</strong> parent image gates now opt out of the full-size host-child rule while retaining their compact minimum touch target and fixed image-relative position. The existing iframe sizing behavior is unchanged.</li>
+    <li><strong>Regression coverage:</strong> the mobile E2E flow opens the repository image-gate fixture at a 390&times;844 viewport and asserts the gate remains inside the reader stage and ends before the page-navigation footer. The supplied EPUB was also inspected and confirmed to use the same plain <code>&lt;img&gt;</code>-based gated-image path.</li>
+    <li><strong>Verification:</strong> <code>npm run test:run</code> passed <strong>259/259</strong>; <code>npm run check</code>, production/PWA <code>npm run build</code>, and <code>npm run check:bundle</code> passed with an initial shell of <strong>78,046 bytes gzip</strong> against the 153,600-byte budget. The focused gate regression passed in Mobile Chrome and Mobile Safari (2/2), the full mobile suite passed in both profiles (24/24), and the cross-browser reader image-reveal flow passed in Chromium, WebKit, Mobile Chrome, and Mobile Safari (4/4).</li>
+  </ul>
+
   <h2>Still open</h2>
   <ol>
     <li>Physical iPhone Safari dogfood.</li>

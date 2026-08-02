@@ -13,6 +13,7 @@ import {
   openSettings,
   readPaginatedStageGeometry,
   readReaderLocation,
+  selectTocEntry,
   setFlow,
   waitForBookTitle,
   waitForStableReaderLocation,
@@ -67,6 +68,74 @@ test.describe("mobile", () => {
     await expect(
       page.getByRole("heading", { name: "將書庫加入主畫面" }),
     ).toBeHidden();
+  });
+
+  test("keeps the image display gate above the page navigation bar", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      !testInfo.project.name.startsWith("Mobile "),
+      "The regression targets the compact mobile reader layout.",
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_READER);
+    await waitForBookTitle(page, "閱讀夾具");
+    await openBook(page, "閱讀夾具");
+    await selectTocEntry(page, /第二章/);
+
+    const gate = page.locator("button.epub-parent-image-gate").first();
+    await expect(gate).toBeVisible({ timeout: 20_000 });
+    const geometry = await page.evaluate(() => {
+      const gate = document
+        .querySelector("button.epub-parent-image-gate")
+        ?.getBoundingClientRect();
+      const stage = document.querySelector(".reader-stage")?.getBoundingClientRect();
+      const footer = document
+        .querySelector(".reader-bottombar")
+        ?.getBoundingClientRect();
+      return {
+        gate: gate
+          ? {
+              left: gate.left,
+              right: gate.right,
+              top: gate.top,
+              bottom: gate.bottom,
+              width: gate.width,
+              height: gate.height,
+            }
+          : null,
+        stage: stage
+          ? {
+              left: stage.left,
+              right: stage.right,
+              top: stage.top,
+              bottom: stage.bottom,
+            }
+          : null,
+        footer: footer
+          ? {
+              left: footer.left,
+              right: footer.right,
+              top: footer.top,
+              bottom: footer.bottom,
+            }
+          : null,
+      };
+    });
+
+    expect(geometry.gate, JSON.stringify(geometry)).not.toBeNull();
+    expect(geometry.stage, JSON.stringify(geometry)).not.toBeNull();
+    expect(geometry.footer, JSON.stringify(geometry)).not.toBeNull();
+    expect(geometry.gate!.left, JSON.stringify(geometry)).toBeGreaterThanOrEqual(
+      geometry.stage!.left - 1,
+    );
+    expect(geometry.gate!.right, JSON.stringify(geometry)).toBeLessThanOrEqual(
+      geometry.stage!.right + 1,
+    );
+    expect(geometry.gate!.bottom, JSON.stringify(geometry)).toBeLessThanOrEqual(
+      geometry.footer!.top + 1,
+    );
   });
 
   test("keeps long paginated chapters and both page edges inside the phone viewport", async ({
