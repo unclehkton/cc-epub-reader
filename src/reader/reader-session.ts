@@ -163,6 +163,197 @@ function closestElement(from: Element, selector: string): Element | null {
   }
 }
 
+const PARENT_IMAGE_GATE_LABEL = "點擊顯示圖片";
+const PARENT_IMAGE_GATE_SHORT_LABEL = "圖片";
+const PARENT_IMAGE_GATE_ERROR_LABEL = "失敗，重試";
+const PARENT_IMAGE_GATE_ERROR_SHORT_LABEL = "重試";
+const PARENT_IMAGE_GATE_ERROR_ARIA = "圖片載入失敗，點擊重試";
+const PARENT_IMAGE_GATE_MIN_PX = 44;
+const PARENT_IMAGE_GATE_COMPACT_WIDTH_PX = 120;
+const XLINK_NS = "http://www.w3.org/1999/xlink";
+
+function isParentImageGateControl(el: Element | null): el is HTMLElement {
+  if (!el || el.tagName.toLowerCase() !== "button") return false;
+  const label = el.getAttribute("aria-label") || "";
+  const text = el.textContent?.trim() || "";
+  return (
+    label.includes(PARENT_IMAGE_GATE_LABEL) ||
+    text.includes(PARENT_IMAGE_GATE_LABEL) ||
+    label.includes(PARENT_IMAGE_GATE_ERROR_ARIA) ||
+    text === PARENT_IMAGE_GATE_ERROR_LABEL ||
+    text === PARENT_IMAGE_GATE_ERROR_SHORT_LABEL
+  );
+}
+
+function collectGatedArchiveImages(doc: Document): Element[] {
+  const out: Element[] = [];
+  const seen = new Set<Element>();
+  const add = (el: Element | null): void => {
+    if (!el || seen.has(el)) return;
+    if (!el.getAttribute("data-epub-src")) return;
+    seen.add(el);
+    out.push(el);
+  };
+  for (const el of Array.from(
+    doc.querySelectorAll("img[data-epub-src], image[data-epub-src]"),
+  )) {
+    add(el);
+  }
+  for (const el of Array.from(doc.getElementsByTagName("image"))) {
+    add(el);
+  }
+  try {
+    for (const el of Array.from(
+      doc.getElementsByTagNameNS("http://www.w3.org/2000/svg", "image"),
+    )) {
+      add(el);
+    }
+  } catch {
+    // ignore engines without getElementsByTagNameNS
+  }
+  return out;
+}
+
+function isSvgArchiveImage(el: Element): boolean {
+  return el.tagName.toLowerCase() === "image";
+}
+
+function parentImageHitTarget(el: Element): Element {
+  if (isSvgArchiveImage(el)) {
+    return el.closest("svg") ?? el;
+  }
+  return el;
+}
+
+function inFrameGateForArchiveImage(el: Element): HTMLElement {
+  if (!isSvgArchiveImage(el)) {
+    const prev = el.previousElementSibling;
+    if (isParentImageGateControl(prev)) return prev;
+    return el as HTMLElement;
+  }
+  const svg = el.closest("svg");
+  const prev = svg?.previousElementSibling ?? el.previousElementSibling;
+  if (isParentImageGateControl(prev)) return prev;
+  return (svg as HTMLElement | null) ?? (el as HTMLElement);
+}
+
+function isRevealedArchiveImage(el: Element): boolean {
+  const values = [
+    el.getAttribute("src"),
+    el.getAttribute("href"),
+    el.getAttribute("xlink:href"),
+  ];
+  try {
+    values.push(el.getAttributeNS(XLINK_NS, "href"));
+  } catch {
+    // ignore
+  }
+  return values.some(
+    (value) =>
+      !!value && (value.startsWith("blob:") || value.startsWith("data:")),
+  );
+}
+
+interface ParentImageGateBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Map an iframe-local image rect into a viewport overlay, clipped to the
+ * iframe, the reader stage, and the top of the bottom bar.
+ */
+function clampParentImageGateBox(
+  imageRect: DOMRect,
+  iframe: HTMLIFrameElement,
+  stage?: Element | null,
+  footer?: Element | null,
+): ParentImageGateBox | null {
+  const iframeRect = iframe.getBoundingClientRect();
+  let left = iframeRect.left + imageRect.left;
+  let top = iframeRect.top + imageRect.top;
+  let right = left + Math.max(PARENT_IMAGE_GATE_MIN_PX, imageRect.width);
+  let bottom = top + Math.max(PARENT_IMAGE_GATE_MIN_PX, imageRect.height);
+
+  left = Math.max(left, iframeRect.left);
+  top = Math.max(top, iframeRect.top);
+  right = Math.min(right, iframeRect.right);
+  bottom = Math.min(bottom, iframeRect.bottom);
+
+  if (stage) {
+    const stageRect = stage.getBoundingClientRect();
+    if (stageRect.width >= 8 && stageRect.height >= 8) {
+      left = Math.max(left, stageRect.left);
+      top = Math.max(top, stageRect.top);
+      right = Math.min(right, stageRect.right);
+      bottom = Math.min(bottom, stageRect.bottom);
+    }
+  }
+  if (footer) {
+    const footerRect = footer.getBoundingClientRect();
+    if (footerRect.height >= 8) {
+      bottom = Math.min(bottom, footerRect.top);
+    }
+  }
+
+  const width = right - left;
+  const height = bottom - top;
+  // A sub-44px sliver must not expand via min-width/min-height over the
+  // bottom bar. Use the in-frame fallback instead.
+  if (width < PARENT_IMAGE_GATE_MIN_PX || height < PARENT_IMAGE_GATE_MIN_PX) {
+    return null;
+  }
+  return { left, top, width, height };
+}
+
+function applyParentImageGateFailure(button: HTMLButtonElement): void {
+  const compact = button.classList.contains("epub-parent-image-gate--compact");
+  button.dataset.gateState = "error";
+  button.textContent = compact
+    ? PARENT_IMAGE_GATE_ERROR_SHORT_LABEL
+    : PARENT_IMAGE_GATE_ERROR_LABEL;
+  button.setAttribute("aria-label", PARENT_IMAGE_GATE_ERROR_ARIA);
+}
+
+function applyParentImageGateBox(
+  button: HTMLButtonElement,
+  box: ParentImageGateBox,
+): void {
+  const compact =
+    box.width < PARENT_IMAGE_GATE_COMPACT_WIDTH_PX || box.height < 48;
+  button.classList.toggle("epub-parent-image-gate--compact", compact);
+  // Failure copy is owned by the click handler. The 1s reposition tick must
+  // not restore the idle "點擊顯示圖片" label over a load error.
+  if (button.dataset.gateState !== "error") {
+    button.textContent = compact
+      ? PARENT_IMAGE_GATE_SHORT_LABEL
+      : PARENT_IMAGE_GATE_LABEL;
+    button.setAttribute("aria-label", PARENT_IMAGE_GATE_LABEL);
+  }
+  button.style.setProperty("--gate-w", `${box.width}px`);
+  button.style.setProperty("--gate-h", `${box.height}px`);
+  button.style.left = `${Math.max(0, box.left)}px`;
+  button.style.top = `${Math.max(0, box.top)}px`;
+  button.style.visibility = "visible";
+  button.style.pointerEvents = "auto";
+  button.hidden = false;
+}
+
+function applyRevealedArchiveUrl(el: Element, url: string): void {
+  if (isSvgArchiveImage(el)) {
+    el.setAttribute("href", url);
+    try {
+      el.setAttributeNS(XLINK_NS, "href", url);
+    } catch {
+      // ignore namespace failures in non-SVG contexts
+    }
+    return;
+  }
+  el.setAttribute("src", url);
+}
+
 class ReaderSessionImpl implements ReaderSession {
   private readonly element: HTMLElement;
   private readonly injectedFactory: EpubFactory | undefined;
@@ -222,7 +413,7 @@ class ReaderSessionImpl implements ReaderSession {
    * Kept as one array so reveal cannot desync button indices from image pairs.
    */
   private parentGatePairs: Array<{
-    img: HTMLImageElement;
+    img: Element;
     inFrameButton: HTMLElement;
     button: HTMLButtonElement;
   }> = [];
@@ -1642,13 +1833,13 @@ class ReaderSessionImpl implements ReaderSession {
     for (const pair of this.parentGatePairs) {
       try {
         // Already revealed — remove ghost control.
-        const liveSrc = pair.img.getAttribute("src") || "";
-        if (liveSrc.startsWith("blob:") || liveSrc.startsWith("data:")) {
+        if (isRevealedArchiveImage(pair.img)) {
           this.hideParentOverlayButton(pair.button);
           pair.button.hidden = true;
           continue;
         }
-        const rect = pair.img.getBoundingClientRect();
+        const hitTarget = parentImageHitTarget(pair.img);
+        const rect = hitTarget.getBoundingClientRect();
         if (!this.isIframeLocalRectVisible(rect, iframe)) {
           // Do NOT park at stage corner — that produced a floating gate on
           // every section when images were off-page or not laid out yet.
@@ -1661,10 +1852,22 @@ class ReaderSessionImpl implements ReaderSession {
           }
           continue;
         }
-        const left = iframeRect.left + rect.left;
-        const top = iframeRect.top + rect.top - 48;
-        pair.button.hidden = false;
-        this.showParentOverlayButton(pair.button, left, top);
+        const box = clampParentImageGateBox(
+          rect,
+          iframe,
+          this.element.closest(".reader-stage"),
+          document.querySelector(".reader-bottombar"),
+        );
+        if (!box) {
+          this.hideParentOverlayButton(pair.button);
+          try {
+            this.showInFrameGateFallback(pair.inFrameButton);
+          } catch {
+            // ignore
+          }
+          continue;
+        }
+        applyParentImageGateBox(pair.button, box);
         // Prefer parent hit target; fully hide in-frame control from a11y tree.
         try {
           this.hideInFrameGateForParent(pair.inFrameButton);
@@ -1924,6 +2127,8 @@ class ReaderSessionImpl implements ReaderSession {
    * Place parent-document gate controls over gated images inside the iframe.
    * Coordinates map iframe-local getBoundingClientRect() into the top document
    * by adding the iframe's own rect (required for position:fixed overlays).
+   * HTML <img> and SVG <image> both get a parent overlay; SVG uses the host
+   * <svg> box as the hit target so full-bleed photo plates are tappable.
    */
   private installParentImageGates(
     doc: Document,
@@ -1935,50 +2140,32 @@ class ReaderSessionImpl implements ReaderSession {
     if (!iframe || !materialize) return;
 
     const candidates: Array<{
-      img: HTMLImageElement;
+      img: Element;
       inFrameButton: HTMLElement;
     }> = [];
-    for (const img of Array.from(
-      doc.querySelectorAll("img[data-epub-src]"),
-    ) as HTMLImageElement[]) {
-      const prev = img.previousElementSibling;
-      if (!prev || prev.tagName.toLowerCase() !== "button") continue;
-      const label = prev.getAttribute("aria-label") || "";
-      const text = prev.textContent?.trim() || "";
-      if (!label.includes("點擊顯示圖片") && !text.includes("點擊顯示圖片")) {
-        continue;
-      }
-      const inFrameButton = prev as HTMLElement;
+    for (const img of collectGatedArchiveImages(doc)) {
+      if (isRevealedArchiveImage(img)) continue;
+      const inFrameButton = inFrameGateForArchiveImage(img);
       candidates.push({ img, inFrameButton });
       // Keep in-frame control as fallback when parent overlay is off-viewport.
-      inFrameButton.setAttribute("aria-hidden", "false");
-      inFrameButton.hidden = false;
-      inFrameButton.style.pointerEvents = "auto";
-      inFrameButton.style.opacity = "1";
-    }
-
-    if (candidates.length === 0) {
-      // Fallback: gated images without a sibling button (serialization quirks).
-      for (const img of Array.from(
-        doc.querySelectorAll("img[data-epub-src]"),
-      ) as HTMLImageElement[]) {
-        candidates.push({ img, inFrameButton: img as unknown as HTMLElement });
+      if (inFrameButton.tagName.toLowerCase() === "button") {
+        inFrameButton.setAttribute("aria-hidden", "false");
+        inFrameButton.hidden = false;
+        inFrameButton.style.pointerEvents = "auto";
+        inFrameButton.style.opacity = "1";
       }
     }
 
     for (const candidate of candidates) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = "點擊顯示圖片";
-      button.setAttribute("aria-label", "點擊顯示圖片");
+      button.textContent = PARENT_IMAGE_GATE_LABEL;
+      button.setAttribute("aria-label", PARENT_IMAGE_GATE_LABEL);
       button.className = "epub-parent-image-gate touch-target";
       button.style.position = "fixed";
       // Stay below app chrome/TOC drawers (typically z-index 100+).
       button.style.zIndex = "20";
-      button.style.minWidth = "44px";
-      button.style.minHeight = "44px";
       button.style.pointerEvents = "auto";
-      button.style.maxWidth = "12rem";
       button.style.visibility = "hidden";
       const pair = {
         img: candidate.img,
@@ -1988,14 +2175,15 @@ class ReaderSessionImpl implements ReaderSession {
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        delete button.dataset.gateState;
         void (async () => {
+          try {
           // Match in-frame reveal: validate stored path before materialize.
           const path = validateRestorableUrl(
             pair.img.getAttribute("data-epub-src"),
           );
           if (!path) {
-            button.textContent = "圖片載入失敗，點擊重試";
-            button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
+            applyParentImageGateFailure(button);
             return;
           }
           let url: string | null =
@@ -2004,14 +2192,13 @@ class ReaderSessionImpl implements ReaderSession {
             url = await materialize(path);
           }
           if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
-            button.textContent = "圖片載入失敗，點擊重試";
-            button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
+            applyParentImageGateFailure(button);
             return;
           }
-          pair.img.setAttribute("src", url);
+          applyRevealedArchiveUrl(pair.img, url);
           // Best-effort srcset (WebKit parent path previously ignored it).
           const srcset = pair.img.getAttribute("data-epub-srcset");
-          if (srcset) {
+          if (srcset && !isSvgArchiveImage(pair.img)) {
             const parts = srcset.split(",");
             const out: string[] = [];
             for (const part of parts) {
@@ -2037,12 +2224,15 @@ class ReaderSessionImpl implements ReaderSession {
               pair.img.setAttribute("srcset", out.join(", "));
             }
           }
-          if (pair.inFrameButton !== pair.img) {
+          if (pair.inFrameButton.tagName.toLowerCase() === "button") {
             pair.inFrameButton.hidden = true;
           }
           button.remove();
           const idx = this.parentGatePairs.indexOf(pair);
           if (idx >= 0) this.parentGatePairs.splice(idx, 1);
+          } catch {
+            applyParentImageGateFailure(button);
+          }
         })();
       });
       this.element.appendChild(button);

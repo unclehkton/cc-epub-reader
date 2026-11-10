@@ -13,6 +13,7 @@ import {
   openSettings,
   readPaginatedStageGeometry,
   readReaderLocation,
+  selectTocEntry,
   setFlow,
   waitForBookTitle,
   waitForStableReaderLocation,
@@ -67,6 +68,183 @@ test.describe("mobile", () => {
     await expect(
       page.getByRole("heading", { name: "將書庫加入主畫面" }),
     ).toBeHidden();
+  });
+
+  test("keeps the image display gate above the page navigation bar", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      !testInfo.project.name.startsWith("Mobile "),
+      "The regression targets the compact mobile reader layout.",
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_READER);
+    await waitForBookTitle(page, "閱讀夾具");
+    await openBook(page, "閱讀夾具");
+    await selectTocEntry(page, /第二章/);
+
+    const gate = page.locator("button.epub-parent-image-gate").first();
+    await expect(gate).toBeVisible({ timeout: 20_000 });
+    const geometry = await page.evaluate(() => {
+      const gate = document
+        .querySelector("button.epub-parent-image-gate")
+        ?.getBoundingClientRect();
+      const stage = document.querySelector(".reader-stage")?.getBoundingClientRect();
+      const footer = document
+        .querySelector(".reader-bottombar")
+        ?.getBoundingClientRect();
+      return {
+        gate: gate
+          ? {
+              left: gate.left,
+              right: gate.right,
+              top: gate.top,
+              bottom: gate.bottom,
+              width: gate.width,
+              height: gate.height,
+            }
+          : null,
+        stage: stage
+          ? {
+              left: stage.left,
+              right: stage.right,
+              top: stage.top,
+              bottom: stage.bottom,
+            }
+          : null,
+        footer: footer
+          ? {
+              left: footer.left,
+              right: footer.right,
+              top: footer.top,
+              bottom: footer.bottom,
+            }
+          : null,
+      };
+    });
+
+    expect(geometry.gate, JSON.stringify(geometry)).not.toBeNull();
+    expect(geometry.stage, JSON.stringify(geometry)).not.toBeNull();
+    expect(geometry.footer, JSON.stringify(geometry)).not.toBeNull();
+    expect(geometry.gate!.left, JSON.stringify(geometry)).toBeGreaterThanOrEqual(
+      geometry.stage!.left - 1,
+    );
+    expect(geometry.gate!.right, JSON.stringify(geometry)).toBeLessThanOrEqual(
+      geometry.stage!.right + 1,
+    );
+    expect(geometry.gate!.bottom, JSON.stringify(geometry)).toBeLessThanOrEqual(
+      geometry.footer!.top + 1,
+    );
+
+    const plate = await page.evaluate(() => {
+      const iframe = document.querySelector(
+        ".reader-host iframe",
+      ) as HTMLIFrameElement | null;
+      const doc = iframe?.contentDocument;
+      if (!iframe || !doc) return null;
+      const target =
+        doc.querySelector("img[data-epub-src], image[data-epub-src]") ??
+        doc.querySelector("svg");
+      if (!target) return null;
+      const hit =
+        target.tagName.toLowerCase() === "image"
+          ? (target.closest("svg") ?? target)
+          : target;
+      const iframeRect = iframe.getBoundingClientRect();
+      const rect = hit.getBoundingClientRect();
+      return {
+        left: iframeRect.left + rect.left,
+        top: iframeRect.top + rect.top,
+        right: iframeRect.left + rect.right,
+        bottom: iframeRect.top + rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    });
+    expect(plate, "chapter image plate").not.toBeNull();
+    expect(geometry.gate!.left).toBeLessThanOrEqual(plate!.left + 2);
+    expect(geometry.gate!.top).toBeLessThanOrEqual(plate!.top + 2);
+    expect(geometry.gate!.right).toBeGreaterThanOrEqual(plate!.right - 2);
+    expect(geometry.gate!.bottom).toBeGreaterThanOrEqual(
+      Math.min(plate!.bottom, geometry.footer!.top) - 2,
+    );
+
+    const labelFits = await gate.evaluate((el) => {
+      const node = el as HTMLElement;
+      return {
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+        overflow: getComputedStyle(node).overflow,
+      };
+    });
+    expect(labelFits.scrollWidth).toBeLessThanOrEqual(labelFits.clientWidth + 1);
+  });
+
+  test("covers the SVG photo plate on a fixed-layout cover", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      !testInfo.project.name.startsWith("Mobile "),
+      "The regression targets the compact mobile reader layout.",
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_MIXED_LAYOUT);
+    await waitForBookTitle(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+    await openBook(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+
+    const gate = page.locator("button.epub-parent-image-gate").first();
+    await expect(gate).toBeVisible({ timeout: 20_000 });
+    const geometry = await page.evaluate(() => {
+      const gate = document
+        .querySelector("button.epub-parent-image-gate")
+        ?.getBoundingClientRect();
+      const iframe = document.querySelector(
+        ".reader-host iframe",
+      ) as HTMLIFrameElement | null;
+      const footer = document
+        .querySelector(".reader-bottombar")
+        ?.getBoundingClientRect();
+      const doc = iframe?.contentDocument;
+      const image = doc?.querySelector("image[data-epub-src], image");
+      const svg = image?.closest("svg") ?? doc?.querySelector("svg");
+      if (!gate || !iframe || !svg) return null;
+      const iframeRect = iframe.getBoundingClientRect();
+      const plate = svg.getBoundingClientRect();
+      const visibleBottom = Math.min(
+        iframeRect.top + plate.bottom,
+        iframeRect.bottom,
+        footer?.top ?? Infinity,
+      );
+      const visibleRight = Math.min(
+        iframeRect.left + plate.right,
+        iframeRect.right,
+      );
+      const visibleLeft = Math.max(iframeRect.left + plate.left, iframeRect.left);
+      const visibleTop = Math.max(iframeRect.top + plate.top, iframeRect.top);
+      return {
+        gate: { width: gate.width, height: gate.height, top: gate.top, bottom: gate.bottom },
+        plate: {
+          width: visibleRight - visibleLeft,
+          height: visibleBottom - visibleTop,
+        },
+        footerTop: footer?.top ?? null,
+      };
+    });
+    expect(geometry, "SVG plate geometry").not.toBeNull();
+    expect(geometry!.plate.width).toBeGreaterThan(200);
+    expect(geometry!.gate.width).toBeCloseTo(geometry!.plate.width, 0);
+    expect(geometry!.gate.height).toBeCloseTo(geometry!.plate.height, 0);
+    if (geometry!.footerTop != null) {
+      expect(geometry!.gate.bottom).toBeLessThanOrEqual(geometry!.footerTop + 1);
+    }
   });
 
   test("keeps long paginated chapters and both page edges inside the phone viewport", async ({
