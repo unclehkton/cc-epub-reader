@@ -42,12 +42,14 @@ describe("Cloudflare Pages deployment config", () => {
       const csp = extractCsp(headers);
 
       expect(csp.startsWith("default-src 'self'")).toBe(true);
-      expect(csp).toMatch(/connect-src\s+'self'(?:\s*;|$)/);
+      // blob: is required for the archive image size check (fetch on the
+      // object URL); without it Cloudflare Pages blocks every reveal.
+      expect(csp).toMatch(/connect-src\s+'self'\s+blob:(?:\s*;|$)/);
 
-      // connect-src must not list any extra host
+      // connect-src may list only 'self' and blob: — no remote host
       const connect = csp.match(/connect-src\s+([^;]+)/i);
       expect(connect).toBeTruthy();
-      expect(connect![1]!.trim()).toBe("'self'");
+      expect(connect![1]!.trim().split(/\s+/)).toEqual(["'self'", "blob:"]);
     });
 
     it("includes the approved baseline directives and no analytics hosts", () => {
@@ -70,11 +72,13 @@ describe("Cloudflare Pages deployment config", () => {
       expect(csp).not.toMatch(/https?:\/\//i);
     });
 
-    it("only allows blob: on proven directives (img-src; no broad wildcards)", () => {
+    it("only allows blob: on proven directives (img-src, connect-src; no broad wildcards)", () => {
       const csp = extractCsp(headers);
 
       // img-src already requires blob: for EPUB archive object URLs
       expect(csp).toMatch(/img-src[^;]*\bblob:/);
+      // connect-src needs blob: for the bounded archive size check (fetch)
+      expect(csp).toMatch(/connect-src[^;]*\bblob:/);
 
       // No wildcard sources
       expect(csp).not.toMatch(
