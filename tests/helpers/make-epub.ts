@@ -8,6 +8,8 @@ export interface MakeEpubOptions {
   chapters?: Array<{ id: string; href: string; title: string; body: string }>;
   /** Extra zip paths (relative) → string/Uint8Array contents */
   extraFiles?: Record<string, string | Uint8Array>;
+  /** Extra OPF manifest items (package-relative hrefs, e.g. Images/photo.jpeg) */
+  extraManifestItems?: Array<{ id: string; href: string; mediaType: string }>;
   /** Omit META-INF/container.xml */
   omitContainer?: boolean;
   /** Omit the OPF package document */
@@ -68,11 +70,20 @@ export async function makeEpub(options: MakeEpubOptions = {}): Promise<Blob> {
   }
 
   if (!options.omitPackage) {
-    const manifestItems = chapters
+    const extraManifest = (options.extraManifestItems ?? [])
       .map(
+        (item) =>
+          `<item id="${item.id}" href="${item.href}" media-type="${item.mediaType}"/>`,
+      )
+      .join("\n    ");
+    const manifestItems = [
+      ...chapters.map(
         (ch) =>
           `<item id="${ch.id}" href="${ch.href}" media-type="application/xhtml+xml"/>`,
-      )
+      ),
+      extraManifest,
+    ]
+      .filter(Boolean)
       .join("\n    ");
     const spineItems = chapters
       .map((ch) => `<itemref idref="${ch.id}"/>`)
