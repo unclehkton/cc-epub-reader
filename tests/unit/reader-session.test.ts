@@ -1912,6 +1912,69 @@ describe("ReaderSession generation ownership", () => {
 
     session.destroy();
   });
+
+  it("keeps the parent-gate failure label across the reposition tick", async () => {
+    const ticks: Array<() => void> = [];
+    const realSetInterval = globalThis.setInterval.bind(globalThis);
+    vi.spyOn(globalThis, "setInterval").mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (timeout === 1000 && typeof handler === "function") {
+        ticks.push(() => {
+          (handler as (...rest: unknown[]) => void)(...args);
+        });
+      }
+      return realSetInterval(handler, timeout as number, ...args);
+    }) as typeof setInterval);
+
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+        <img data-epub-src="Images/missing.jpeg" alt="">
+      </body></html>`,
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    const iframe = document.createElement("iframe");
+    host.appendChild(iframe);
+    stubClientRect(iframe, { left: 8, top: 16, width: 360, height: 640 });
+    const img = chapterDoc.querySelector("img")!;
+    stubClientRect(img, { left: 12, top: 80, width: 300, height: 220 });
+
+    try {
+      await openAndResolve(session, control);
+      const gate = document.querySelector(
+        "button.epub-parent-image-gate",
+      ) as HTMLButtonElement | null;
+      expect(gate).toBeTruthy();
+
+      // Fail closed without a rejected promise: archive createUrl can return a
+      // non-blob path, which materialize drops. Rejecting imageUrl before the
+      // click never reaches the failure label (unhandled rejection).
+      control.imageUrl.resolve("not-a-blob");
+      gate!.click();
+      await waitFor(
+        () => (gate!.textContent || "").includes("失敗"),
+        "failure label",
+      );
+      expect(gate!.textContent?.trim()).toBe("失敗，重試");
+      expect(gate!.getAttribute("aria-label")).toBe("圖片載入失敗，點擊重試");
+      expect(gate!.dataset.gateState).toBe("error");
+
+      expect(ticks.length).toBeGreaterThan(0);
+      for (const tick of ticks) tick();
+
+      expect(gate!.textContent?.trim()).toBe("失敗，重試");
+      expect(gate!.getAttribute("aria-label")).toBe("圖片載入失敗，點擊重試");
+    } finally {
+      vi.mocked(globalThis.setInterval).mockRestore();
+      session.destroy();
+    }
+  });
 });
 
 function stubClientRect(

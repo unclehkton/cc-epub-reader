@@ -165,6 +165,9 @@ function closestElement(from: Element, selector: string): Element | null {
 
 const PARENT_IMAGE_GATE_LABEL = "點擊顯示圖片";
 const PARENT_IMAGE_GATE_SHORT_LABEL = "圖片";
+const PARENT_IMAGE_GATE_ERROR_LABEL = "失敗，重試";
+const PARENT_IMAGE_GATE_ERROR_SHORT_LABEL = "重試";
+const PARENT_IMAGE_GATE_ERROR_ARIA = "圖片載入失敗，點擊重試";
 const PARENT_IMAGE_GATE_MIN_PX = 44;
 const PARENT_IMAGE_GATE_COMPACT_WIDTH_PX = 120;
 const XLINK_NS = "http://www.w3.org/1999/xlink";
@@ -175,7 +178,10 @@ function isParentImageGateControl(el: Element | null): el is HTMLElement {
   const text = el.textContent?.trim() || "";
   return (
     label.includes(PARENT_IMAGE_GATE_LABEL) ||
-    text.includes(PARENT_IMAGE_GATE_LABEL)
+    text.includes(PARENT_IMAGE_GATE_LABEL) ||
+    label.includes(PARENT_IMAGE_GATE_ERROR_ARIA) ||
+    text === PARENT_IMAGE_GATE_ERROR_LABEL ||
+    text === PARENT_IMAGE_GATE_ERROR_SHORT_LABEL
   );
 }
 
@@ -302,17 +308,30 @@ function clampParentImageGateBox(
   return { left, top, width, height };
 }
 
+function applyParentImageGateFailure(button: HTMLButtonElement): void {
+  const compact = button.classList.contains("epub-parent-image-gate--compact");
+  button.dataset.gateState = "error";
+  button.textContent = compact
+    ? PARENT_IMAGE_GATE_ERROR_SHORT_LABEL
+    : PARENT_IMAGE_GATE_ERROR_LABEL;
+  button.setAttribute("aria-label", PARENT_IMAGE_GATE_ERROR_ARIA);
+}
+
 function applyParentImageGateBox(
   button: HTMLButtonElement,
   box: ParentImageGateBox,
 ): void {
   const compact =
     box.width < PARENT_IMAGE_GATE_COMPACT_WIDTH_PX || box.height < 48;
-  button.textContent = compact
-    ? PARENT_IMAGE_GATE_SHORT_LABEL
-    : PARENT_IMAGE_GATE_LABEL;
-  button.setAttribute("aria-label", PARENT_IMAGE_GATE_LABEL);
   button.classList.toggle("epub-parent-image-gate--compact", compact);
+  // Failure copy is owned by the click handler. The 1s reposition tick must
+  // not restore the idle "點擊顯示圖片" label over a load error.
+  if (button.dataset.gateState !== "error") {
+    button.textContent = compact
+      ? PARENT_IMAGE_GATE_SHORT_LABEL
+      : PARENT_IMAGE_GATE_LABEL;
+    button.setAttribute("aria-label", PARENT_IMAGE_GATE_LABEL);
+  }
   button.style.setProperty("--gate-w", `${box.width}px`);
   button.style.setProperty("--gate-h", `${box.height}px`);
   button.style.left = `${Math.max(0, box.left)}px`;
@@ -2156,14 +2175,15 @@ class ReaderSessionImpl implements ReaderSession {
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        delete button.dataset.gateState;
         void (async () => {
+          try {
           // Match in-frame reveal: validate stored path before materialize.
           const path = validateRestorableUrl(
             pair.img.getAttribute("data-epub-src"),
           );
           if (!path) {
-            button.textContent = "圖片載入失敗，點擊重試";
-            button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
+            applyParentImageGateFailure(button);
             return;
           }
           let url: string | null =
@@ -2172,8 +2192,7 @@ class ReaderSessionImpl implements ReaderSession {
             url = await materialize(path);
           }
           if (!url || (!url.startsWith("blob:") && !url.startsWith("data:"))) {
-            button.textContent = "圖片載入失敗，點擊重試";
-            button.setAttribute("aria-label", "圖片載入失敗，點擊重試");
+            applyParentImageGateFailure(button);
             return;
           }
           applyRevealedArchiveUrl(pair.img, url);
@@ -2211,6 +2230,9 @@ class ReaderSessionImpl implements ReaderSession {
           button.remove();
           const idx = this.parentGatePairs.indexOf(pair);
           if (idx >= 0) this.parentGatePairs.splice(idx, 1);
+          } catch {
+            applyParentImageGateFailure(button);
+          }
         })();
       });
       this.element.appendChild(button);
