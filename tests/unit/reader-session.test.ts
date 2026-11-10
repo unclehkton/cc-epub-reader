@@ -492,6 +492,9 @@ describe("ReaderSession generation ownership", () => {
 
   afterEach(() => {
     host?.remove();
+    document
+      .querySelectorAll("button.epub-parent-image-gate")
+      .forEach((button) => button.remove());
   });
 
   function mountSession(control: FakeControl) {
@@ -1715,4 +1718,117 @@ describe("ReaderSession generation ownership", () => {
 
     session.destroy();
   });
+
+  it("parent overlay covers SVG photo plates and reveals via href, not src", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+        <svg xmlns="http://www.w3.org/2000/svg" width="800" height="1175" viewBox="0 0 800 1175">
+          <image data-epub-src="Images/image00490.jpeg" width="800" height="1175"></image>
+        </svg>
+      </body></html>`,
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    const iframe = document.createElement("iframe");
+    host.appendChild(iframe);
+    stubClientRect(iframe, { left: 10, top: 20, width: 400, height: 600 });
+    const svg = chapterDoc.querySelector("svg")!;
+    stubClientRect(svg, { left: 0, top: 0, width: 400, height: 580 });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("blob:")) {
+        return {
+          blob: async () => new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/jpeg" }),
+        } as Response;
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as typeof fetch;
+
+    try {
+      await openAndResolve(session, control);
+
+      const gate = document.querySelector(
+        "button.epub-parent-image-gate",
+      ) as HTMLButtonElement | null;
+      expect(gate).toBeTruthy();
+      expect(gate!.style.width).toBe("400px");
+      expect(gate!.style.height).toBe("580px");
+      expect(gate!.style.left).toBe("10px");
+      expect(gate!.style.top).toBe("20px");
+
+      const image = chapterDoc.getElementsByTagName("image")[0]!;
+      control.imageUrl.resolve("blob:fake-svg-plate");
+      gate!.click();
+      await waitFor(
+        () => (image.getAttribute("href") || "").startsWith("blob:"),
+        "svg href reveal",
+      );
+      expect(image.getAttribute("href")).toBe("blob:fake-svg-plate");
+      expect(image.getAttribute("src")).toBeNull();
+      expect(document.querySelector("button.epub-parent-image-gate")).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+      session.destroy();
+    }
+  });
+
+  it("parent overlay covers unrevealed HTML images instead of sitting above them", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+        <img data-epub-src="Images/image00493.jpeg" alt="">
+      </body></html>`,
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    const iframe = document.createElement("iframe");
+    host.appendChild(iframe);
+    stubClientRect(iframe, { left: 8, top: 16, width: 360, height: 640 });
+    const img = chapterDoc.querySelector("img")!;
+    stubClientRect(img, { left: 12, top: 80, width: 300, height: 220 });
+
+    await openAndResolve(session, control);
+
+    const gate = document.querySelector(
+      "button.epub-parent-image-gate",
+    ) as HTMLButtonElement | null;
+    expect(gate).toBeTruthy();
+    expect(gate!.style.width).toBe("300px");
+    expect(gate!.style.height).toBe("220px");
+    expect(gate!.style.left).toBe("20px");
+    expect(gate!.style.top).toBe("96px");
+
+    session.destroy();
+  });
 });
+
+function stubClientRect(
+  el: Element,
+  box: { left: number; top: number; width: number; height: number },
+): void {
+  const rect = {
+    x: box.left,
+    y: box.top,
+    left: box.left,
+    top: box.top,
+    width: box.width,
+    height: box.height,
+    right: box.left + box.width,
+    bottom: box.top + box.height,
+    toJSON() {
+      return this;
+    },
+  } as DOMRect;
+  vi.spyOn(el, "getBoundingClientRect").mockReturnValue(rect);
+  if (el instanceof HTMLIFrameElement) {
+    Object.defineProperty(el, "clientWidth", { configurable: true, value: box.width });
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: box.height });
+  }
+}

@@ -52,6 +52,22 @@ button {
   touch-action: manipulation;
 }
 
+button.epub-parent-image-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  border: 0;
+  border-radius: 0;
+  background: rgba(247, 245, 237, 0.78);
+  color: var(--ink);
+  font-size: 0.95rem;
+  box-sizing: border-box;
+  white-space: nowrap;
+  min-width: 9rem;
+}
+
 .library-screen {
   max-width: 40rem;
   margin: 0 auto;
