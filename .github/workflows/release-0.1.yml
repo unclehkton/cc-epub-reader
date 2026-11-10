@@ -34,6 +34,9 @@ jobs:
       - name: Bundle budget
         run: npm run check:bundle
 
+      - name: Service worker build id
+        run: npm run check:sw
+
       - name: Audit (high+)
         run: npm audit --audit-level=high
 

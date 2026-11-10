@@ -10,3 +10,6 @@ declare module "*?raw" {
 interface ServiceWorkerGlobalScope {
   __WB_MANIFEST: Array<string | { url: string; revision: string | null }>;
 }
+
+/** Build id stamped by `vite.config.ts` (see `src/platform/build-id.ts`). */
+declare const __BUILD_ID__: string;
