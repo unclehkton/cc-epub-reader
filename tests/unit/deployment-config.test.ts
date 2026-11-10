@@ -97,6 +97,19 @@ describe("Cloudflare Pages deployment config", () => {
         expect(frameSrc).not.toMatch(/\*/);
       }
     });
+
+    it("makes the browser revalidate the service worker script", () => {
+      const block = headers
+        .split(/\r?\n\r?\n/)
+        .find((section) => /^\/sw\.js\s*$/m.test(section));
+      expect(block, "/sw.js header block must exist").toBeTruthy();
+
+      const cacheControl = block!.match(/Cache-Control:\s*(.+)/i)?.[1] ?? "";
+      // Insurance for browsers that ignore register({ updateViaCache: "none" }):
+      // a cached sw.js delays the update check until the asset TTL expires.
+      expect(cacheControl).toMatch(/no-cache|no-store/i);
+      expect(cacheControl).not.toMatch(/max-age=[1-9]/i);
+    });
   });
 
   describe("public/_redirects", () => {
