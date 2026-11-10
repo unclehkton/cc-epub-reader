@@ -136,6 +136,105 @@ test.describe("mobile", () => {
     expect(geometry.gate!.bottom, JSON.stringify(geometry)).toBeLessThanOrEqual(
       geometry.footer!.top + 1,
     );
+
+    const plate = await page.evaluate(() => {
+      const iframe = document.querySelector(
+        ".reader-host iframe",
+      ) as HTMLIFrameElement | null;
+      const doc = iframe?.contentDocument;
+      if (!iframe || !doc) return null;
+      const target =
+        doc.querySelector("img[data-epub-src], image[data-epub-src]") ??
+        doc.querySelector("svg");
+      if (!target) return null;
+      const hit =
+        target.tagName.toLowerCase() === "image"
+          ? (target.closest("svg") ?? target)
+          : target;
+      const iframeRect = iframe.getBoundingClientRect();
+      const rect = hit.getBoundingClientRect();
+      return {
+        left: iframeRect.left + rect.left,
+        top: iframeRect.top + rect.top,
+        right: iframeRect.left + rect.right,
+        bottom: iframeRect.top + rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      };
+    });
+    expect(plate, "chapter image plate").not.toBeNull();
+    expect(geometry.gate!.left).toBeLessThanOrEqual(plate!.left + 2);
+    expect(geometry.gate!.top).toBeLessThanOrEqual(plate!.top + 2);
+    expect(geometry.gate!.right).toBeGreaterThanOrEqual(plate!.right - 2);
+    expect(geometry.gate!.bottom).toBeGreaterThanOrEqual(
+      Math.min(plate!.bottom, geometry.footer!.top) - 2,
+    );
+  });
+
+  test("covers the SVG photo plate on a fixed-layout cover", async ({
+    page,
+  }, testInfo) => {
+    test.skip(
+      !testInfo.project.name.startsWith("Mobile "),
+      "The regression targets the compact mobile reader layout.",
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    await gotoLibrary(page);
+    await importEpub(page, FIXTURE_MIXED_LAYOUT);
+    await waitForBookTitle(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+    await openBook(
+      page,
+      "這是用來測試手機閱讀器版面不應被書名撐闊的超長書名",
+    );
+
+    const gate = page.locator("button.epub-parent-image-gate").first();
+    await expect(gate).toBeVisible({ timeout: 20_000 });
+    const geometry = await page.evaluate(() => {
+      const gate = document
+        .querySelector("button.epub-parent-image-gate")
+        ?.getBoundingClientRect();
+      const iframe = document.querySelector(
+        ".reader-host iframe",
+      ) as HTMLIFrameElement | null;
+      const footer = document
+        .querySelector(".reader-bottombar")
+        ?.getBoundingClientRect();
+      const doc = iframe?.contentDocument;
+      const image = doc?.querySelector("image[data-epub-src], image");
+      const svg = image?.closest("svg") ?? doc?.querySelector("svg");
+      if (!gate || !iframe || !svg) return null;
+      const iframeRect = iframe.getBoundingClientRect();
+      const plate = svg.getBoundingClientRect();
+      const visibleBottom = Math.min(
+        iframeRect.top + plate.bottom,
+        iframeRect.bottom,
+        footer?.top ?? Infinity,
+      );
+      const visibleRight = Math.min(
+        iframeRect.left + plate.right,
+        iframeRect.right,
+      );
+      const visibleLeft = Math.max(iframeRect.left + plate.left, iframeRect.left);
+      const visibleTop = Math.max(iframeRect.top + plate.top, iframeRect.top);
+      return {
+        gate: { width: gate.width, height: gate.height, top: gate.top, bottom: gate.bottom },
+        plate: {
+          width: visibleRight - visibleLeft,
+          height: visibleBottom - visibleTop,
+        },
+        footerTop: footer?.top ?? null,
+      };
+    });
+    expect(geometry, "SVG plate geometry").not.toBeNull();
+    expect(geometry!.plate.width).toBeGreaterThan(200);
+    expect(geometry!.gate.width).toBeCloseTo(geometry!.plate.width, 0);
+    expect(geometry!.gate.height).toBeCloseTo(geometry!.plate.height, 0);
+    if (geometry!.footerTop != null) {
+      expect(geometry!.gate.bottom).toBeLessThanOrEqual(geometry!.footerTop + 1);
+    }
   });
 
   test("keeps long paginated chapters and both page edges inside the phone viewport", async ({

@@ -78,6 +78,15 @@ describe("Kindle-style nested Images/ paths", () => {
     expect(map.get("cover00569.jpeg")).toBe("Images/cover00569.jpeg");
   });
 
+  it("does not guess a duplicated basename when the joined path misses", () => {
+    const book = bookWithResources(["Text/cover.jpg", "Images/cover.jpg"]);
+    const map = buildArchiveUrlMap(book);
+    expect(map.get("cover.jpg")).toBeUndefined();
+    const resolve = createArchiveResolver(book, undefined, "Text/part.xhtml");
+    expect(resolve("Images/cover.jpg")).toBe("Images/cover.jpg");
+    expect(resolve("Other/cover.jpg")).toBe("Text/Other/cover.jpg");
+  });
+
   it("gates XHTML SVG xlink:href=../Images/*.jpeg before serialization", () => {
     const book = bookWithResources(["Images/image00490.jpeg"]);
     const resolve = createArchiveResolver(book, undefined, "Text/part0000.xhtml");

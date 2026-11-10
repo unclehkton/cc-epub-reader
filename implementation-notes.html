@@ -11,16 +11,18 @@
   <p><strong>Convention:</strong> Read before meaningful changes. Only <a href="docs/code-review-CURRENT.md">docs/code-review-CURRENT.md</a> holds the current blocker table. The dated review log is history, not current status.</p>
 
   <h2>Current status</h2>
-  <p><strong>Done (2026-11-10):</strong> Nested Kindle/z-library EPUBs can reveal packaged images. Parent overlays now cover HTML <code>img</code> and SVG <code>image</code> photo plates; SVG reveal sets <code>href</code>/<code>xlink:href</code>. Archive map aliases capital <code>Images/</code>; the resolver no longer re-joins already package-relative <code>Images/foo</code> under <code>Text/</code>.</p>
-  <p><strong>Next:</strong> Physical iPhone Safari dogfood. Unrevealed HTML images without width/height still reserve a 48px box (the overlay stays tappable). Do not commit user-supplied EPUBs.</p>
+  <p><strong>Done (2026-11-10):</strong> Nested Kindle/z-library EPUBs can reveal packaged images. Parent overlays cover HTML <code>img</code> and SVG <code>image</code> plates via <code>--gate-w</code>/<code>--gate-h</code> (beats the host <code>width/height: auto !important</code> rule), clamped to the stage and above the bottom bar. SVG reveal sets <code>href</code>/<code>xlink:href</code>. Archive map aliases capital <code>Images/</code>; basename fallback only when the leaf name is unique.</p>
+  <p><strong>Next:</strong> Physical iPhone Safari dogfood. Unrevealed HTML images without width/height still reserve a 48px box. Do not commit user-supplied EPUBs.</p>
 
   <h2>Decisions</h2>
   <ul>
+    <li><strong>2026-11-10 — Gate size uses CSS variables, not inline width/height.</strong> Why: <code>.reader-host &gt; .epub-parent-image-gate</code> must keep <code>!important</code> to escape the iframe 100% sizing rule; normal inline <code>width</code> lost that cascade and rendered a 113×44 chip on a 278×394 plate. <code>width: var(--gate-w) !important</code> keeps the stylesheet in control. Rejected: more <code>setProperty(..., "important")</code> on inline width (fights the stylesheet). Clamp JS to iframe ∩ stage ∩ footer top so a full-plate gate cannot cover page chrome.</li>
     <li><strong>2026-11-10 — Parent overlay hit-target is the laid-out box, including host <code>&lt;svg&gt;</code>.</strong> Why: this book’s first pages are full-bleed SVG <code>&lt;image xlink:href="../Images/*.jpeg"&gt;</code> inside a sandboxed iframe without <code>allow-scripts</code>. Querying only <code>img[data-epub-src]</code> left a blank plate with a tiny in-frame button. Setting <code>src</code> on SVG <code>&lt;image&gt;</code> does not paint. Rejected: auto-loading archive images (privacy gate stays); relying on in-iframe clicks (WebKit). Fixture EPUBs keep same-folder lowercase <code>images/</code> HTML <code>img</code>.</li>
   </ul>
 
   <h2>Change log</h2>
   <ul>
+    <li><strong>2026-11-10 — Gate cascade + unique basename.</strong> What: <code>--gate-w</code>/<code>--gate-h</code> so the overlay actually covers the plate; clamp above the bottom bar; basename alias only when unique. Why: review P1 (inline size discarded by <code>!important</code>) and P3s. Refs: <code>src/app.css</code>, <code>src/reader/reader-session.ts</code>, <code>tests/e2e/mobile.spec.ts</code>.</li>
     <li><strong>2026-11-10 — Nested archive image reveal.</strong> What: SVG parent gates covering the host SVG; HTML overlays cover the image rect; case-insensitive <code>images/</code> aliases; resolver fallback from a missed <code>Text/Images/…</code> join to OPF <code>Images/…</code>. Why: Kindle-style <code>OEBPS/Text/</code> + <code>OEBPS/Images/</code> books failed to open photos. Follow-up: larger reserved box for unrevealed HTML <code>img</code> without intrinsic size. Refs: <code>src/reader/reader-session.ts</code>, <code>src/reader/epub-adapter.ts</code>, <code>tests/unit/nested-archive-images.test.ts</code>, <code>tests/unit/reader-session.test.ts</code>.</li>
   </ul>
 

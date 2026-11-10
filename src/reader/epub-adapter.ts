@@ -265,12 +265,37 @@ export async function loadEpubFactory(): Promise<EpubFactory> {
 }
 
 /**
+ * Basename alias only when exactly one archive entry uses that leaf name.
+ * A wrong photo is worse than an inert gate.
+ */
+function uniqueBasenameHit(
+  map: Map<string, string>,
+  base: string,
+): string | undefined {
+  const leaf = base.trim();
+  if (!leaf || leaf.includes("/")) return undefined;
+  const lower = leaf.toLowerCase();
+  const values = new Set<string>();
+  for (const [href, value] of map) {
+    const hrefLeaf = href.split("/").pop();
+    if (!hrefLeaf) continue;
+    if (hrefLeaf === leaf || hrefLeaf.toLowerCase() === lower) {
+      values.add(value);
+      if (values.size > 1) return undefined;
+    }
+  }
+  if (values.size !== 1) return undefined;
+  return values.values().next().value;
+}
+
+/**
  * Build a package-path map from an opened book's resource inventory.
  * Values are always package-relative hrefs — never archive-wide blob replacements.
  */
 export function buildArchiveUrlMap(book: AdaptedBook): Map<string, string> {
   const map = new Map<string, string>();
   const urls = book.resources?.urls ?? [];
+  const ambiguousBasenames = new Set<string>();
 
   for (const href of urls) {
     if (!href) continue;
@@ -280,8 +305,14 @@ export function buildArchiveUrlMap(book: AdaptedBook): Map<string, string> {
     const slash = href.lastIndexOf("/");
     if (slash >= 0) {
       const base = href.slice(slash + 1);
-      if (base && !map.has(base)) {
-        map.set(base, href);
+      if (base && !ambiguousBasenames.has(base)) {
+        const existing = map.get(base);
+        if (existing === undefined) {
+          map.set(base, href);
+        } else if (existing !== href) {
+          map.delete(base);
+          ambiguousBasenames.add(base);
+        }
       }
       const imagesIdx = href.toLowerCase().indexOf("images/");
       if (imagesIdx >= 0) {
@@ -347,7 +378,7 @@ export function createArchiveResolver(
         if (directHit) return directHit;
         const base = noDot.split("/").pop();
         if (base && base !== noDot) {
-          const baseHit = lookup(base);
+          const baseHit = uniqueBasenameHit(map, base);
           if (baseHit) return baseHit;
         }
         // Safe package-relative path for later materialization.

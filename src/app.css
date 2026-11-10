@@ -65,7 +65,6 @@ button.epub-parent-image-gate {
   font-size: 0.95rem;
   box-sizing: border-box;
   white-space: nowrap;
-  min-width: 9rem;
 }
 
 .library-screen {
@@ -543,12 +542,14 @@ button.epub-parent-image-gate {
   height: auto !important;
 }
 
-/* Parent image gates are compact controls, not EPUB viewport children. Keep
-   the shared iframe sizing rule from stretching them over page navigation. */
+/* Parent image gates live in .reader-host, so they inherit the iframe
+   100% width/height !important rule. Size comes from --gate-w/--gate-h
+   (clamped to the stage in JS). auto is the unset fallback. */
 .reader-host > .epub-parent-image-gate {
-  width: auto !important;
-  max-width: calc(100vw - 1rem) !important;
-  height: auto !important;
+  width: var(--gate-w, auto) !important;
+  height: var(--gate-h, auto) !important;
+  max-width: none !important;
+  max-height: none !important;
 }
 
 .reader-host iframe {

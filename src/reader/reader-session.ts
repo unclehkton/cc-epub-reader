@@ -245,6 +245,69 @@ function isRevealedArchiveImage(el: Element): boolean {
   );
 }
 
+interface ParentImageGateBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Map an iframe-local image rect into a viewport overlay, clipped to the
+ * iframe, the reader stage, and the top of the bottom bar.
+ */
+function clampParentImageGateBox(
+  imageRect: DOMRect,
+  iframe: HTMLIFrameElement,
+  stage?: Element | null,
+  footer?: Element | null,
+): ParentImageGateBox | null {
+  const iframeRect = iframe.getBoundingClientRect();
+  let left = iframeRect.left + imageRect.left;
+  let top = iframeRect.top + imageRect.top;
+  let right = left + Math.max(44, imageRect.width);
+  let bottom = top + Math.max(44, imageRect.height);
+
+  left = Math.max(left, iframeRect.left);
+  top = Math.max(top, iframeRect.top);
+  right = Math.min(right, iframeRect.right);
+  bottom = Math.min(bottom, iframeRect.bottom);
+
+  if (stage) {
+    const stageRect = stage.getBoundingClientRect();
+    if (stageRect.width >= 8 && stageRect.height >= 8) {
+      left = Math.max(left, stageRect.left);
+      top = Math.max(top, stageRect.top);
+      right = Math.min(right, stageRect.right);
+      bottom = Math.min(bottom, stageRect.bottom);
+    }
+  }
+  if (footer) {
+    const footerRect = footer.getBoundingClientRect();
+    if (footerRect.height >= 8) {
+      bottom = Math.min(bottom, footerRect.top);
+    }
+  }
+
+  const width = right - left;
+  const height = bottom - top;
+  if (width < 8 || height < 8) return null;
+  return { left, top, width, height };
+}
+
+function applyParentImageGateBox(
+  button: HTMLButtonElement,
+  box: ParentImageGateBox,
+): void {
+  button.style.setProperty("--gate-w", `${box.width}px`);
+  button.style.setProperty("--gate-h", `${box.height}px`);
+  button.style.left = `${Math.max(0, box.left)}px`;
+  button.style.top = `${Math.max(0, box.top)}px`;
+  button.style.visibility = "visible";
+  button.style.pointerEvents = "auto";
+  button.hidden = false;
+}
+
 function applyRevealedArchiveUrl(el: Element, url: string): void {
   if (isSvgArchiveImage(el)) {
     el.setAttribute("href", url);
@@ -1756,12 +1819,22 @@ class ReaderSessionImpl implements ReaderSession {
           }
           continue;
         }
-        const left = iframeRect.left + rect.left;
-        const top = iframeRect.top + rect.top;
-        pair.button.style.width = `${Math.max(44, rect.width)}px`;
-        pair.button.style.height = `${Math.max(44, rect.height)}px`;
-        pair.button.hidden = false;
-        this.showParentOverlayButton(pair.button, left, top);
+        const box = clampParentImageGateBox(
+          rect,
+          iframe,
+          this.element.closest(".reader-stage"),
+          document.querySelector(".reader-bottombar"),
+        );
+        if (!box) {
+          this.hideParentOverlayButton(pair.button);
+          try {
+            this.showInFrameGateFallback(pair.inFrameButton);
+          } catch {
+            // ignore
+          }
+          continue;
+        }
+        applyParentImageGateBox(pair.button, box);
         // Prefer parent hit target; fully hide in-frame control from a11y tree.
         try {
           this.hideInFrameGateForParent(pair.inFrameButton);

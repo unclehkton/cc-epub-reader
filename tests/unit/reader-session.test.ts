@@ -1756,8 +1756,8 @@ describe("ReaderSession generation ownership", () => {
         "button.epub-parent-image-gate",
       ) as HTMLButtonElement | null;
       expect(gate).toBeTruthy();
-      expect(gate!.style.width).toBe("400px");
-      expect(gate!.style.height).toBe("580px");
+      expect(gate!.style.getPropertyValue("--gate-w")).toBe("400px");
+      expect(gate!.style.getPropertyValue("--gate-h")).toBe("580px");
       expect(gate!.style.left).toBe("10px");
       expect(gate!.style.top).toBe("20px");
 
@@ -1800,12 +1800,49 @@ describe("ReaderSession generation ownership", () => {
       "button.epub-parent-image-gate",
     ) as HTMLButtonElement | null;
     expect(gate).toBeTruthy();
-    expect(gate!.style.width).toBe("300px");
-    expect(gate!.style.height).toBe("220px");
+    expect(gate!.style.getPropertyValue("--gate-w")).toBe("300px");
+    expect(gate!.style.getPropertyValue("--gate-h")).toBe("220px");
     expect(gate!.style.left).toBe("20px");
     expect(gate!.style.top).toBe("96px");
 
     session.destroy();
+  });
+
+  it("clamps the parent overlay to the iframe and above the bottom bar", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+        <img data-epub-src="images/a.png" alt="">
+      </body></html>`,
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    const iframe = document.createElement("iframe");
+    host.appendChild(iframe);
+    stubClientRect(iframe, { left: 8, top: 16, width: 360, height: 640 });
+    const img = chapterDoc.querySelector("img")!;
+    stubClientRect(img, { left: 12, top: 560, width: 300, height: 120 });
+
+    const footer = document.createElement("footer");
+    footer.className = "reader-bottombar";
+    document.body.appendChild(footer);
+    stubClientRect(footer, { left: 0, top: 640, width: 390, height: 80 });
+
+    try {
+      await openAndResolve(session, control);
+      const gate = document.querySelector(
+        "button.epub-parent-image-gate",
+      ) as HTMLButtonElement | null;
+      expect(gate).toBeTruthy();
+      expect(gate!.style.top).toBe("576px");
+      expect(gate!.style.getPropertyValue("--gate-w")).toBe("300px");
+      expect(gate!.style.getPropertyValue("--gate-h")).toBe("64px");
+    } finally {
+      footer.remove();
+      session.destroy();
+    }
   });
 });
 
