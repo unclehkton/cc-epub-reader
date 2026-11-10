@@ -65,6 +65,13 @@ button.epub-parent-image-gate {
   font-size: 0.95rem;
   box-sizing: border-box;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.epub-parent-image-gate--compact {
+  padding: 0;
+  font-size: 0.75rem;
 }
 
 .library-screen {
@@ -550,6 +557,8 @@ button.epub-parent-image-gate {
   height: var(--gate-h, auto) !important;
   max-width: none !important;
   max-height: none !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
 }
 
 .reader-host iframe {

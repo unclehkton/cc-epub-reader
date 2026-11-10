@@ -1844,6 +1844,74 @@ describe("ReaderSession generation ownership", () => {
       session.destroy();
     }
   });
+
+  it("hides the parent overlay when the clamped box is under 44px", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+        <img data-epub-src="images/a.png" alt="">
+      </body></html>`,
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    const iframe = document.createElement("iframe");
+    host.appendChild(iframe);
+    stubClientRect(iframe, { left: 8, top: 16, width: 360, height: 640 });
+    const img = chapterDoc.querySelector("img")!;
+    stubClientRect(img, { left: 12, top: 630, width: 300, height: 20 });
+
+    const footer = document.createElement("footer");
+    footer.className = "reader-bottombar";
+    document.body.appendChild(footer);
+    stubClientRect(footer, { left: 0, top: 650, width: 390, height: 80 });
+
+    try {
+      await openAndResolve(session, control);
+      const gate = document.querySelector(
+        "button.epub-parent-image-gate",
+      ) as HTMLButtonElement | null;
+      expect(gate).toBeTruthy();
+      expect(gate!.hidden || gate!.style.visibility === "hidden").toBe(true);
+    } finally {
+      footer.remove();
+      session.destroy();
+    }
+  });
+
+  it("uses a compact label on a 44px parent overlay", async () => {
+    const control = createControl();
+    const chapterDoc = new DOMParser().parseFromString(
+      `<html><body>
+        <button type="button" aria-label="點擊顯示圖片">點擊顯示圖片</button>
+        <img data-epub-src="images/a.png" alt="">
+      </body></html>`,
+      "text/html",
+    );
+    control.contentsDocument = chapterDoc;
+    const { session } = mountSession(control);
+    const iframe = document.createElement("iframe");
+    host.appendChild(iframe);
+    stubClientRect(iframe, { left: 8, top: 16, width: 360, height: 640 });
+    const img = chapterDoc.querySelector("img")!;
+    stubClientRect(img, { left: 12, top: 80, width: 32, height: 32 });
+
+    await openAndResolve(session, control);
+    const gate = document.querySelector(
+      "button.epub-parent-image-gate",
+    ) as HTMLButtonElement | null;
+    expect(gate).toBeTruthy();
+    expect(gate!.style.getPropertyValue("--gate-w")).toBe("44px");
+    expect(gate!.style.getPropertyValue("--gate-h")).toBe("44px");
+    expect(gate!.getAttribute("aria-label")).toBe("點擊顯示圖片");
+    expect(gate!.textContent?.trim()).toBe("圖片");
+    expect(gate!.classList.contains("epub-parent-image-gate--compact")).toBe(
+      true,
+    );
+
+    session.destroy();
+  });
 });
 
 function stubClientRect(

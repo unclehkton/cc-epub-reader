@@ -169,6 +169,16 @@ test.describe("mobile", () => {
     expect(geometry.gate!.bottom).toBeGreaterThanOrEqual(
       Math.min(plate!.bottom, geometry.footer!.top) - 2,
     );
+
+    const labelFits = await gate.evaluate((el) => {
+      const node = el as HTMLElement;
+      return {
+        scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth,
+        overflow: getComputedStyle(node).overflow,
+      };
+    });
+    expect(labelFits.scrollWidth).toBeLessThanOrEqual(labelFits.clientWidth + 1);
   });
 
   test("covers the SVG photo plate on a fixed-layout cover", async ({

@@ -164,6 +164,9 @@ function closestElement(from: Element, selector: string): Element | null {
 }
 
 const PARENT_IMAGE_GATE_LABEL = "點擊顯示圖片";
+const PARENT_IMAGE_GATE_SHORT_LABEL = "圖片";
+const PARENT_IMAGE_GATE_MIN_PX = 44;
+const PARENT_IMAGE_GATE_COMPACT_WIDTH_PX = 120;
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 
 function isParentImageGateControl(el: Element | null): el is HTMLElement {
@@ -265,8 +268,8 @@ function clampParentImageGateBox(
   const iframeRect = iframe.getBoundingClientRect();
   let left = iframeRect.left + imageRect.left;
   let top = iframeRect.top + imageRect.top;
-  let right = left + Math.max(44, imageRect.width);
-  let bottom = top + Math.max(44, imageRect.height);
+  let right = left + Math.max(PARENT_IMAGE_GATE_MIN_PX, imageRect.width);
+  let bottom = top + Math.max(PARENT_IMAGE_GATE_MIN_PX, imageRect.height);
 
   left = Math.max(left, iframeRect.left);
   top = Math.max(top, iframeRect.top);
@@ -291,7 +294,11 @@ function clampParentImageGateBox(
 
   const width = right - left;
   const height = bottom - top;
-  if (width < 8 || height < 8) return null;
+  // A sub-44px sliver must not expand via min-width/min-height over the
+  // bottom bar. Use the in-frame fallback instead.
+  if (width < PARENT_IMAGE_GATE_MIN_PX || height < PARENT_IMAGE_GATE_MIN_PX) {
+    return null;
+  }
   return { left, top, width, height };
 }
 
@@ -299,6 +306,13 @@ function applyParentImageGateBox(
   button: HTMLButtonElement,
   box: ParentImageGateBox,
 ): void {
+  const compact =
+    box.width < PARENT_IMAGE_GATE_COMPACT_WIDTH_PX || box.height < 48;
+  button.textContent = compact
+    ? PARENT_IMAGE_GATE_SHORT_LABEL
+    : PARENT_IMAGE_GATE_LABEL;
+  button.setAttribute("aria-label", PARENT_IMAGE_GATE_LABEL);
+  button.classList.toggle("epub-parent-image-gate--compact", compact);
   button.style.setProperty("--gate-w", `${box.width}px`);
   button.style.setProperty("--gate-h", `${box.height}px`);
   button.style.left = `${Math.max(0, box.left)}px`;
@@ -2132,8 +2146,6 @@ class ReaderSessionImpl implements ReaderSession {
       button.style.position = "fixed";
       // Stay below app chrome/TOC drawers (typically z-index 100+).
       button.style.zIndex = "20";
-      button.style.minWidth = "44px";
-      button.style.minHeight = "44px";
       button.style.pointerEvents = "auto";
       button.style.visibility = "hidden";
       const pair = {
