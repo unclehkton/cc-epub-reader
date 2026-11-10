@@ -146,30 +146,44 @@ function useDeferredServiceWorkerUpdate(): {
     let cancelled = false;
     let registration: ServiceWorkerRegistration | undefined;
 
-    const onUpdateFound = () => {
-      const installing = registration?.installing;
-      if (!installing) {
+    /** Surface the prompt once a new worker finishes installing. */
+    const watchWorker = (worker: ServiceWorker | null | undefined) => {
+      if (!worker) {
         return;
       }
-      installing.addEventListener("statechange", () => {
+      const onStateChange = () => {
         if (
-          installing.state === "installed" &&
+          worker.state === "installed" &&
           navigator.serviceWorker.controller &&
           !cancelled
         ) {
-          setWaitingWorker(registration?.waiting ?? installing);
+          setWaitingWorker(registration?.waiting ?? worker);
           setNeedRefresh(true);
         }
-      });
+      };
+      if (worker.state === "installed") {
+        onStateChange();
+        return;
+      }
+      worker.addEventListener("statechange", onStateChange);
+    };
+
+    const onUpdateFound = () => {
+      watchWorker(registration?.installing);
     };
 
     void navigator.serviceWorker
-      .register("/sw.js")
+      // "none" bypasses the HTTP cache for sw.js, so a deploy is noticed on the
+      // next launch instead of after the CDN asset TTL expires.
+      .register("/sw.js", { updateViaCache: "none" })
       .then((reg) => {
         if (cancelled) {
           return;
         }
         registration = reg;
+        // The browser can start the update check during navigation, before the
+        // updatefound listener exists, so also watch the pending worker here.
+        watchWorker(reg.installing);
         if (reg.waiting && navigator.serviceWorker.controller) {
           setWaitingWorker(reg.waiting);
           setNeedRefresh(true);

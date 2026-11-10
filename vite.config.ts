@@ -1,9 +1,53 @@
+import { execFileSync } from "node:child_process";
 import preact from "@preact/preset-vite";
+import type { Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 import { defineConfig } from "vitest/config";
+import { resolveBuildId } from "./src/platform/build-id";
+
+function localCommit(): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    // No git checkout (tarball, container): the id falls back to "local".
+    return undefined;
+  }
+}
+
+/**
+ * Injected as `__BUILD_ID__`. It changes on every build so each deploy ships a
+ * new `sw.js`; without that, an installed PWA keeps serving the document it
+ * cached at install and never sees a release that only edits `public/_headers`.
+ */
+const buildId = resolveBuildId({
+  override: process.env.BUILD_ID,
+  ciCommit: process.env.GITHUB_SHA,
+  localCommit: localCommit(),
+});
+
+/** Publish the id in the document so a live deploy can be identified with curl. */
+function buildIdMeta(): Plugin {
+  return {
+    name: "books-build-id",
+    transformIndexHtml: () => [
+      {
+        tag: "meta",
+        attrs: { name: "build-id", content: buildId },
+        injectTo: "head-prepend",
+      },
+    ],
+  };
+}
 
 export default defineConfig({
+  define: {
+    __BUILD_ID__: JSON.stringify(buildId),
+  },
   plugins: [
+    buildIdMeta(),
     preact(),
     VitePWA({
       strategies: "injectManifest",
