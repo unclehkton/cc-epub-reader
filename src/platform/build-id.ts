@@ -7,7 +7,11 @@
  * cached at install time.
  */
 export interface BuildIdInput {
-  /** Explicit override, for example `BUILD_ID` in a release pipeline. */
+  /**
+   * Label that replaces the commit part, for example `BUILD_ID` in a release
+   * pipeline. The build time is still appended: a reused label must never make
+   * two builds ship the same id.
+   */
   override?: string | undefined;
   /** Commit reported by CI, for example `GITHUB_SHA`. */
   ciCommit?: string | undefined;
@@ -31,15 +35,13 @@ function stampUtc(date: Date): string {
 }
 
 export function resolveBuildId(input: BuildIdInput = {}): string {
-  const override = input.override ? sanitize(input.override) : "";
-  if (override) {
-    return override;
-  }
-
-  const commit =
+  // The timestamp is always appended, including for an override: two builds
+  // must never embed the same id, or the worker can stay byte-identical.
+  const label =
+    sanitize(input.override ?? "") ||
     sanitize(input.ciCommit ?? "").slice(0, SHORT_COMMIT_LENGTH) ||
     sanitize(input.localCommit ?? "").slice(0, SHORT_COMMIT_LENGTH) ||
     FALLBACK_COMMIT;
 
-  return `${commit}-${stampUtc(input.now ?? new Date())}`;
+  return `${label}-${stampUtc(input.now ?? new Date())}`;
 }

@@ -20,10 +20,10 @@ describe("resolveBuildId", () => {
     ).toBe("0123456-20261110T091233456Z");
   });
 
-  it("honors an explicit override without appending a timestamp", () => {
-    expect(
-      resolveBuildId({ override: "release-2026.11.10", now: NOW }),
-    ).toBe("release-2026.11.10");
+  it("keeps an explicit override as the label and still appends the build time", () => {
+    expect(resolveBuildId({ override: "release-2026.11.10", now: NOW })).toBe(
+      "release-2026.11.10-20261110T091233456Z",
+    );
   });
 
   it("ignores a blank override", () => {
@@ -43,7 +43,7 @@ describe("resolveBuildId", () => {
     });
 
     expect(id).toMatch(/^[A-Za-z0-9._-]+$/);
-    expect(id).toBe("feature-release-0.1-x");
+    expect(id).toBe("feature-release-0.1-x-20261110T091233456Z");
   });
 
   it("changes on every build even for the same commit", () => {
@@ -54,6 +54,18 @@ describe("resolveBuildId", () => {
       now: new Date("2026-11-10T09:12:33.457Z"),
     });
 
+    expect(first).not.toBe(second);
+  });
+
+  it("changes on every build even when the same override is reused", () => {
+    // A fixed BUILD_ID must not make two builds ship the same worker.
+    const first = resolveBuildId({ override: "ci-run-42", now: NOW });
+    const second = resolveBuildId({
+      override: "ci-run-42",
+      now: new Date("2026-11-10T09:12:34.000Z"),
+    });
+
+    expect(first).toBe("ci-run-42-20261110T091233456Z");
     expect(first).not.toBe(second);
   });
 });
